@@ -1,0 +1,31 @@
+[package]
+name = "syn-sight"
+version = "11.0.1"
+edition = "2021"
+rust-version = "1.74"
+authors = []
+description = "Real-time TUI monitor for tcp_syn_stop eBPF daemon"
+license = "MIT"
+
+[dependencies]
+ratatui    = "0.26"
+crossterm  = { version = "0.27", features = ["event-stream"] }
+libbpf-rs  = "0.24"
+anyhow     = "1.0"
+clap       = { version = "4.5", features = ["derive"] }
+rusqlite   = { version = "0.31", features = ["bundled"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+lru        = "0.12"
+nucleo-matcher = "0.3"
+libc           = "0.2"
+
+[lints.clippy]
+unwrap_used = "warn"
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+needless_pass_by_value = "warn"
+redundant_closure_for_method_calls = "warn"
+
+[dev-dependencies]
+tempfile = "3"

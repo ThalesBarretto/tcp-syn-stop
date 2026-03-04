@@ -1,0 +1,46 @@
+[Unit]
+Description=eBPF TCP SYN Flood Protection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=root
+# Automatic management of /run/tcp_syn_stop
+RuntimeDirectory=tcp_syn_stop
+RuntimeDirectoryMode=0775
+RuntimeDirectoryGroup=tcp_syn_stop
+
+EnvironmentFile=-/etc/default/tcp-syn-stop
+ExecStartPre=+/bin/mkdir -p /sys/fs/bpf/tcp_syn_stop
+ExecStart=/opt/tcp_syn_stop/tcp_syn_stop $DAEMON_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5
+# Health monitoring (daemon sends heartbeat every 5s)
+WatchdogSec=15
+
+# Security Hardening
+# ProtectSystem=full (not strict): the daemon needs write access to
+# /sys/fs/bpf for pinning BPF maps.  strict makes /sys read-only and
+# ReadWritePaths cannot reliably bind-mount bpffs pseudo-paths.
+ProtectSystem=full
+ReadWritePaths=/opt/tcp_syn_stop
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+# ProtectKernelTunables=no: bpffs lives under /sys/fs/bpf which systemd
+# classifies as a kernel tunable. The daemon must pin/unpin maps there.
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

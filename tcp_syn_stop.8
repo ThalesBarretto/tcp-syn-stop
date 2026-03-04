@@ -1,0 +1,94 @@
+.TH TCP_SYN_STOP 8 "__DATE__" "__VERSION__" "System Administration"
+.SH NAME
+tcp_syn_stop \- eBPF TCP SYN flood protection daemon (BPF loader)
+.SH SYNOPSIS
+.B tcp_syn_stop
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+\fBtcp_syn_stop\fR is a minimal BPF loader daemon that provides high-performance
+TCP SYN flood protection using \fBeBPF (XDP and Tracepoints)\fR. It loads and
+pins BPF programs, attaches XDP to network interfaces, monitors liveness,
+and reloads whitelist/blacklist configuration on SIGHUP.
+
+Policy logic (TTL expiry, autoban, intelligence persistence) is handled by
+the companion \fBsyn-intel\fR service. Real-time visualization is provided by
+\fBsyn-sight\fR.
+
+The system uses a 3-tier defense architecture:
+.IP 1. 4
+\fBeBPF/XDP Layer\fR: Drops packets from blacklisted IPs and dynamically identified spoofed sources at wire speed.
+Every drop is atomically counted per IP.
+.IP 2. 4
+\fBASN Auto-Ban\fR: \fBsyn-intel\fR automatically blocks entire subnet prefixes if multiple attacking IPs are identified from the same ASN.
+.IP 3. 4
+\fBnftables Layer\fR: Provides rate-limiting for non-spoofed attackers and UDP flood protection.
+
+.SH OPTIONS
+.TP
+.BI \-i ", " \-\-interface " INTERFACE"
+Specify the network interface to attach the XDP program to. May be repeated
+(max 8 interfaces). At least one interface is required.
+.TP
+.BI \-w ", " \-\-whitelist " FILE"
+Path to the whitelist configuration file containing IPs or CIDR blocks that should never be blocked. Default is \fB/etc/tcp_syn_stop/whitelist.conf\fR.
+.TP
+.BI \-b ", " \-\-blacklist " FILE"
+Path to the static blacklist configuration file. Default is \fB/etc/tcp_syn_stop/blacklist.conf\fR.
+.TP
+.BI \-l ", " \-\-logfile " FILE"
+Path to a file where runtime logs should be written. If omitted, logs are sent to standard output (or syslog when running as a service).
+.TP
+.B \-v ", " \-\-verbose
+Enable verbose logging, including \fBlibbpf\fR debug output.
+.TP
+.B \-V ", " \-\-version
+Print the program version and git revision, then exit.
+
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload whitelist and blacklist configuration files. Rate-limited to once
+every 30 seconds.
+.TP
+.B SIGTERM, SIGINT
+Gracefully shut down: unpin BPF maps, remove PID file, and exit.
+
+.SH SECURITY
+On startup, after attaching XDP and writing the PID file, the daemon drops
+all capabilities except \fBCAP_BPF\fR and \fBCAP_NET_ADMIN\fR using
+\fBlibcap\fR, and sets \fBPR_SET_NO_NEW_PRIVS\fR. The systemd unit file
+provides additional sandboxing with \fBProtectSystem=full\fR,
+\fBNoNewPrivileges\fR, \fBPrivateDevices\fR, \fBMemoryDenyWriteExecute\fR,
+and kernel protection directives.
+
+.SH FILES
+.TP
+.I /etc/tcp_syn_stop/whitelist.conf
+Default whitelist configuration.
+.TP
+.I /etc/tcp_syn_stop/blacklist.conf
+Default blacklist configuration.
+.TP
+.I /etc/tcp_syn_stop/tcp_syn_stop.conf
+nftables ruleset for rate limiting and flood protection.
+.TP
+.I /sys/fs/bpf/tcp_syn_stop/
+BPF maps pinned to bpffs. Used by \fBsyn-intel\fR and \fBsyn-sight\fR to
+read and write map state.
+.TP
+.I /run/tcp_syn_stop/tcp_syn_stop.pid
+PID file, used by \fBsyn-intel\fR to send SIGHUP on list changes.
+.TP
+.I /opt/tcp_syn_stop/ip2asn.db
+SQLite database containing ASN mappings and attack intelligence records
+(managed by \fBsyn-intel\fR).
+.TP
+.I /etc/logrotate.d/tcp_syn_stop
+Log rotation policy for the daemon log file.
+
+.SH SEE ALSO
+.BR nft (8),
+.BR journalctl (1)
+
+.SH AUTHOR
+__MAINTAINER__

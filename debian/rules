@@ -1,0 +1,38 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) all
+
+override_dh_auto_install:
+	# Daemon binary + ASN update script
+	install -D -m 0755 tcp_syn_stop debian/tcp-syn-stop/opt/tcp_syn_stop/tcp_syn_stop
+	install -D -m 0755 tcp-syn-stop-asn-update debian/tcp-syn-stop/opt/tcp_syn_stop/tcp-syn-stop-asn-update
+	# Policy engine binary
+	install -D -m 0755 syn-intel.bin debian/tcp-syn-stop/opt/tcp_syn_stop/syn-intel
+	# TUI binary
+	install -D -m 0755 syn-sight.bin debian/tcp-syn-stop/usr/bin/syn-sight
+	# Config files (auto-detected as conffiles since they're under /etc)
+	install -D -m 0644 whitelist.conf debian/tcp-syn-stop/etc/tcp_syn_stop/whitelist.conf
+	install -D -m 0644 blacklist.conf debian/tcp-syn-stop/etc/tcp_syn_stop/blacklist.conf
+	install -D -m 0644 tcp_syn_stop.conf debian/tcp-syn-stop/etc/tcp_syn_stop/tcp_syn_stop.conf
+	install -D -m 0644 tcp-syn-stop.default debian/tcp-syn-stop/etc/default/tcp-syn-stop
+	install -D -m 0644 syn-intel.default debian/tcp-syn-stop/etc/default/syn-intel
+
+override_dh_auto_test:
+	# BPF tests require root + kernel support — skip in build environment
+	true
+
+override_dh_auto_clean:
+	$(MAKE) clean || true
+
+override_dh_installsystemd:
+	dh_installsystemd --name=tcp_syn_stop --no-start
+	dh_installsystemd --name=syn-intel --no-start
+	dh_installsystemd --name=tcp-syn-stop-asn-update --no-start
+
+override_dh_installchangelogs:
+	dh_installchangelogs debian/changelog

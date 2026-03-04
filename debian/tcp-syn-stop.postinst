@@ -1,0 +1,21 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    addgroup --quiet --system tcp_syn_stop || true
+    adduser --quiet --system --no-create-home \
+        --shell /usr/sbin/nologin \
+        --ingroup tcp_syn_stop _syn_intel || true
+
+    # Ensure daemon runtime dir is group-accessible
+    chgrp tcp_syn_stop /opt/tcp_syn_stop 2>/dev/null || true
+    chmod 2775 /opt/tcp_syn_stop 2>/dev/null || true
+
+    # Database needs group write for syn-intel persistence
+    if [ -f /opt/tcp_syn_stop/ip2asn.db ]; then
+        chgrp tcp_syn_stop /opt/tcp_syn_stop/ip2asn.db
+        chmod g+rw /opt/tcp_syn_stop/ip2asn.db
+    fi
+fi
+
+#DEBHELPER#

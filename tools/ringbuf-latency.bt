@@ -1,0 +1,45 @@
+#!/usr/bin/env bpftrace
+/*
+ * ringbuf-latency.bt — BPF ringbuf submit-to-consume latency.
+ *
+ * Measures the time between bpf_ringbuf_submit() in the XDP/kprobe
+ * programs and ring_buffer__poll() consuming the event in userspace.
+ * High latency indicates the main loop is stalled (e.g., by SQLite I/O
+ * before the dbio offload, or a slow TTL expiry sweep).
+ *
+ * Usage: sudo bpftrace tools/ringbuf-latency.bt
+ */
+
+BEGIN
+{
+    printf("Tracing ringbuf submit→consume latency... Ctrl-C to stop.\n");
+}
+
+/* Track when BPF submits an event to the ringbuf */
+kprobe:bpf_ringbuf_submit
+{
+    @rb_submit = nsecs;
+}
+
+/* Track when userspace consumes from the ringbuf via epoll */
+uprobe:/opt/tcp_syn_stop/tcp_syn_stop:handle_event
+{
+    if (@rb_submit > 0) {
+        $lat = nsecs - @rb_submit;
+        @consume_us = hist($lat / 1000);
+        @rb_submit = 0;
+    }
+}
+
+interval:s:10
+{
+    printf("\n--- Ringbuf submit→consume latency (us) ---\n");
+    print(@consume_us);
+    clear(@consume_us);
+}
+
+END
+{
+    clear(@rb_submit);
+    clear(@consume_us);
+}

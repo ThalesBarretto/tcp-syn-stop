@@ -1,0 +1,115 @@
+#!/usr/bin/env bpftrace
+/*
+ * main-loop-profile.bt — Per-function time breakdown via uprobes.
+ *
+ * Instruments the main-loop phases of the tcp_syn_stop daemon to
+ * measure wall-clock time spent in each 5-second tick component.
+ * Complements the built-in self-instrumentation (tick_*_us fields)
+ * with independent external measurement.
+ *
+ * Usage: sudo bpftrace tools/main-loop-profile.bt
+ *
+ * Note: Requires the daemon binary at /opt/tcp_syn_stop/tcp_syn_stop
+ * (installed path).  For development, adjust the path below.
+ */
+
+#define BIN "/opt/tcp_syn_stop/tcp_syn_stop"
+
+BEGIN
+{
+    printf("Profiling tcp_syn_stop main-loop phases... Ctrl-C to stop.\n");
+}
+
+/* engine_process_metrics — BPF counter aggregation + top-K */
+uprobe:BIN:engine_process_metrics
+{
+    @metrics_start[tid] = nsecs;
+}
+
+uretprobe:BIN:engine_process_metrics
+/@metrics_start[tid]/
+{
+    @metrics_us = hist((nsecs - @metrics_start[tid]) / 1000);
+    delete(@metrics_start[tid]);
+}
+
+/* database_collect_intel — intel hash drain + ASN resolution */
+uprobe:BIN:database_collect_intel
+{
+    @intel_start[tid] = nsecs;
+}
+
+uretprobe:BIN:database_collect_intel
+/@intel_start[tid]/
+{
+    @intel_us = hist((nsecs - @intel_start[tid]) / 1000);
+    delete(@intel_start[tid]);
+}
+
+/* ttl_expire — heap-based TTL expiry sweep */
+uprobe:BIN:ttl_expire
+{
+    @ttl_start[tid] = nsecs;
+}
+
+uretprobe:BIN:ttl_expire
+/@ttl_start[tid]/
+{
+    @ttl_us = hist((nsecs - @ttl_start[tid]) / 1000);
+    delete(@ttl_start[tid]);
+}
+
+/* engine_publish_state — RCU snapshot publication */
+uprobe:BIN:engine_publish_state
+{
+    @publish_start[tid] = nsecs;
+}
+
+uretprobe:BIN:engine_publish_state
+/@publish_start[tid]/
+{
+    @publish_us = hist((nsecs - @publish_start[tid]) / 1000);
+    delete(@publish_start[tid]);
+}
+
+/* autoban_evaluate — ASN prefix analysis */
+uprobe:BIN:autoban_evaluate
+{
+    @autoban_start[tid] = nsecs;
+}
+
+uretprobe:BIN:autoban_evaluate
+/@autoban_start[tid]/
+{
+    @autoban_us = hist((nsecs - @autoban_start[tid]) / 1000);
+    delete(@autoban_start[tid]);
+}
+
+interval:s:30
+{
+    printf("\n=== Main-loop phase breakdown (us) ===\n");
+    printf("\nengine_process_metrics:\n");
+    print(@metrics_us);
+    printf("\ndatabase_collect_intel:\n");
+    print(@intel_us);
+    printf("\nttl_expire:\n");
+    print(@ttl_us);
+    printf("\nengine_publish_state:\n");
+    print(@publish_us);
+    printf("\nautoban_evaluate:\n");
+    print(@autoban_us);
+    clear(@metrics_us);
+    clear(@intel_us);
+    clear(@ttl_us);
+    clear(@publish_us);
+    clear(@autoban_us);
+}
+
+END
+{
+    clear(@metrics_start);
+    clear(@intel_start);
+    clear(@ttl_start);
+    clear(@publish_start);
+    clear(@autoban_start);
+}

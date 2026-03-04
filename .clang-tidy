@@ -1,0 +1,14 @@
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-branch-clone,
+  cert-*,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  performance-*,
+  -performance-no-int-to-ptr,
+  portability-*,
+HeaderFilterRegex: '^src/'
+WarningsAsErrors: ''

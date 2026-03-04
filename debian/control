@@ -1,0 +1,25 @@
+Source: tcp-syn-stop
+Section: net
+Priority: optional
+Maintainer: __MAINTAINER__
+Build-Depends: debhelper-compat (= 13),
+               clang,
+               llvm,
+               libbpf-dev,
+               libelf-dev,
+               zlib1g-dev,
+               libnftables-dev,
+               libcap-dev,
+               bpftool,
+               pkg-config,
+               linux-headers-amd64
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: tcp-syn-stop
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, nftables, curl
+Description: High-performance eBPF TCP SYN flood protection daemon
+ tcp_syn_stop leverages eBPF (XDP and Kprobes) to detect and drop
+ malicious SYN flood traffic at the network driver level, before it
+ impacts the system's CPU and networking stack.

@@ -1,0 +1,60 @@
+#!/usr/bin/env bpftrace
+/*
+ * map-pressure.bt — BPF map operation latency histograms.
+ *
+ * Traces bpf_map_lookup_elem and bpf_map_update_elem to measure
+ * per-operation latency.  Under attack, the 65K-entry LRU hash
+ * (drop_ips) and 4K-entry blacklist can see elevated lookup times
+ * due to hash collisions or LRU eviction pressure.
+ *
+ * Usage: sudo bpftrace tools/map-pressure.bt
+ */
+
+BEGIN
+{
+    printf("Tracing BPF map operation latency... Ctrl-C to stop.\n");
+}
+
+kprobe:__bpf_map_lookup_elem
+{
+    @lookup_start[tid] = nsecs;
+}
+
+kretprobe:__bpf_map_lookup_elem
+/@lookup_start[tid]/
+{
+    $lat = nsecs - @lookup_start[tid];
+    @lookup_ns = hist($lat);
+    delete(@lookup_start[tid]);
+}
+
+kprobe:bpf_map_update_elem
+{
+    @update_start[tid] = nsecs;
+}
+
+kretprobe:bpf_map_update_elem
+/@update_start[tid]/
+{
+    $lat = nsecs - @update_start[tid];
+    @update_ns = hist($lat);
+    delete(@update_start[tid]);
+}
+
+interval:s:10
+{
+    printf("\n--- Map lookup latency (ns) ---\n");
+    print(@lookup_ns);
+    printf("\n--- Map update latency (ns) ---\n");
+    print(@update_ns);
+    clear(@lookup_ns);
+    clear(@update_ns);
+}
+
+END
+{
+    clear(@lookup_start);
+    clear(@update_start);
+    clear(@lookup_ns);
+    clear(@update_ns);
+}

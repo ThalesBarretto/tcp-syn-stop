@@ -1,0 +1,3 @@
+# Arguments passed to the syn-intel policy engine.
+# See syn-intel --help for all options.
+INTEL_ARGS="--ttl 60 --autoban-threshold 5"

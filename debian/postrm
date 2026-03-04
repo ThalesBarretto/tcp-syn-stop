@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    purge)
+        rm -f /opt/tcp_syn_stop/ip2asn.db
+        rm -f /opt/tcp_syn_stop/ip2asn-v4.tsv
+        rmdir /opt/tcp_syn_stop 2>/dev/null || true
+        rmdir /etc/tcp_syn_stop 2>/dev/null || true
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

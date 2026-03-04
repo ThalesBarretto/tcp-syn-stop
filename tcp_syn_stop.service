@@ -1,0 +1,32 @@
+[Unit]
+Description=eBPF TCP SYN Flood Protection
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=root
+# Automatic management of /run/tcp_syn_stop
+RuntimeDirectory=tcp_syn_stop
+RuntimeDirectoryMode=0750
+
+EnvironmentFile=-/etc/default/tcp-syn-stop
+ExecStart=/opt/tcp_syn_stop/tcp_syn_stop $DAEMON_ARGS
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=always
+RestartSec=5
+# Health monitoring (daemon sends heartbeat every 5s)
+WatchdogSec=15
+
+# Security Hardening
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+# Ensure we have the minimal required capabilities for eBPF/XDP.
+# CAP_NET_ADMIN: XDP attach/detach, nftables sync
+# CAP_SYS_ADMIN: BPF program load, map operations
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN
+
+[Install]
+WantedBy=multi-user.target

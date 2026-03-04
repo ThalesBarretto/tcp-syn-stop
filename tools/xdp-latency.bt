@@ -1,0 +1,47 @@
+#!/usr/bin/env bpftrace
+/*
+ * xdp-latency.bt — Histogram of XDP program execution time.
+ *
+ * Traces the xdp_drop_spoofed_syns program entry/exit to measure
+ * per-packet processing latency in nanoseconds.  Useful for detecting
+ * map contention or unexpectedly slow lookups under high PPS.
+ *
+ * Usage: sudo bpftrace tools/xdp-latency.bt
+ * Output: latency histogram printed every 5 seconds.
+ */
+
+BEGIN
+{
+    printf("Tracing XDP program latency (ns)... Ctrl-C to stop.\n");
+}
+
+kprobe:xdp_drop_spoofed_syns
+{
+    @start[tid] = nsecs;
+}
+
+kretprobe:xdp_drop_spoofed_syns
+/@start[tid]/
+{
+    $lat = nsecs - @start[tid];
+    @xdp_ns = hist($lat);
+    @count = count();
+    delete(@start[tid]);
+}
+
+interval:s:5
+{
+    printf("\n--- XDP latency histogram (ns) ---\n");
+    print(@xdp_ns);
+    printf("Total calls: ");
+    print(@count);
+    clear(@xdp_ns);
+    clear(@count);
+}
+
+END
+{
+    clear(@start);
+    clear(@xdp_ns);
+    clear(@count);
+}

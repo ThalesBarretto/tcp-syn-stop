@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: tcp-syn-stop
+Upstream-Contact: __MAINTAINER__
+Source: local build
+
+Files: *
+Copyright: 2024-2026 __MAINTAINER__
+License: GPL-2.0-only
+
+Files: syn-sight/*
+Copyright: 2024-2026 __MAINTAINER__
+License: GPL-2.0-only
+
+License: GPL-2.0-only
+ On Debian systems, the complete text of the GNU General Public
+ License version 2 can be found in "/usr/share/common-licenses/GPL-2".

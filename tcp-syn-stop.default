@@ -1,0 +1,10 @@
+# Arguments passed to the tcp_syn_stop daemon.
+# At minimum, specify the network interface(s) with -i.
+#
+# Examples:
+#   Single interface:    DAEMON_ARGS="-i eth0"
+#   Multiple interfaces: DAEMON_ARGS="-i eth0 -i eth1"
+#   Custom config:           DAEMON_ARGS="-i ens1 -w /etc/tcp_syn_stop/whitelist.conf"
+#
+# See tcp_syn_stop(8) or tcp_syn_stop --help for all options.
+DAEMON_ARGS="-i eth0"

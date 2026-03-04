@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly ip2asn database refresh for tcp-syn-stop
+
+[Timer]
+OnCalendar=monthly
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

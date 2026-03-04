@@ -1,0 +1,41 @@
+#!/bin/sh
+# tcp-syn-stop-asn-update — download and import the ip2asn IPv4 database
+set -eu
+
+ASN_URL="https://iptoasn.com/data/ip2asn-v4.tsv.gz"
+INSTALL_DIR="/opt/tcp_syn_stop"
+TSV_FILE="${INSTALL_DIR}/ip2asn-v4.tsv"
+INTEL="${INSTALL_DIR}/syn-intel"
+
+log() { logger -t tcp-syn-stop-asn-update "$@"; echo "$@"; }
+
+# Download to a temp file; decompress; atomically replace the old TSV.
+tmp=$(mktemp "${TSV_FILE}.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+log "Downloading ${ASN_URL}..."
+if ! curl -fsSL --retry 3 --retry-delay 10 "$ASN_URL" | gunzip > "$tmp"; then
+    log "ERROR: download failed"
+    exit 1
+fi
+
+# Sanity check: file should have >400k lines (current data ~515k)
+lines=$(wc -l < "$tmp")
+if [ "$lines" -lt 400000 ]; then
+    log "ERROR: downloaded file has only ${lines} lines (expected >400k); aborting"
+    exit 1
+fi
+
+mv -f "$tmp" "$TSV_FILE"
+trap - EXIT
+log "Downloaded ${lines} ASN ranges."
+
+# Import into SQLite via syn-intel (Rust — no Python dependency)
+log "Importing into SQLite..."
+"$INTEL" --import-asn "$TSV_FILE"
+
+# Fix permissions for syn-intel runtime access
+chgrp tcp_syn_stop "${INSTALL_DIR}/ip2asn.db" 2>/dev/null || true
+chmod g+rw "${INSTALL_DIR}/ip2asn.db" 2>/dev/null || true
+
+log "ASN database update complete."

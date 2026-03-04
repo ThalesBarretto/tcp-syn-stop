@@ -1,0 +1,35 @@
+[Unit]
+Description=BPF Policy Engine for tcp_syn_stop
+After=tcp_syn_stop.service
+Requires=tcp_syn_stop.service
+
+[Service]
+Type=simple
+User=root
+RuntimeDirectory=tcp_syn_stop
+RuntimeDirectoryPreserve=yes
+EnvironmentFile=-/etc/default/syn-intel
+ExecStart=/opt/tcp_syn_stop/syn-intel $INTEL_ARGS
+Restart=always
+RestartSec=5
+
+# Security Hardening
+ProtectSystem=full
+ReadWritePaths=/opt/tcp_syn_stop
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+# ProtectKernelTunables=no: syn-intel accesses pinned BPF maps
+# under /sys/fs/bpf which systemd classifies as kernel tunables.
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

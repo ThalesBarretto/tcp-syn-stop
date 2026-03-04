@@ -1,0 +1,5 @@
+tcp-syn-stop (__VERSION__) stable; urgency=low
+
+  * Release __VERSION__ (__HASH__)
+
+ -- __MAINTAINER__  __DATE__

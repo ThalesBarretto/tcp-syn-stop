@@ -1,0 +1,10 @@
+.git/
+.obj/
+build/
+repo/
+syn-sight/target/
+__pycache__/
+*.deb
+*.bin
+ip2asn.db
+ip2asn-v4.tsv

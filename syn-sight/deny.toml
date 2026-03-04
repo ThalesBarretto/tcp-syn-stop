@@ -1,0 +1,17 @@
+[advisories]
+ignore = [
+    # paste is unmaintained (transitive dep from ratatui); no replacement available yet
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "MPL-2.0"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
