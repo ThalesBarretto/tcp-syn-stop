@@ -947,6 +947,31 @@ impl App {
     }
 
     /// Rewrite the focused list file in the current (sorted) in-memory order.
+    /// Acquire an exclusive advisory lock on `{path}.lock`.
+    ///
+    /// Returns the lock-file `File` as a guard — the lock is released when
+    /// it is dropped.  Uses `LOCK_NB` so a second TUI session gets an
+    /// immediate error instead of blocking.
+    fn try_lock_list(path: &str) -> Result<std::fs::File, String> {
+        use std::os::unix::io::AsRawFd;
+
+        let lock_path = format!("{path}.lock");
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| format!("Cannot create lock file: {e}"))?;
+
+        // SAFETY: valid fd, standard POSIX flock flags.
+        let ret = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            Err("List locked by another session".to_string())
+        } else {
+            Ok(lock_file)
+        }
+    }
+
     pub fn rewrite_sorted(&mut self) {
         use std::io::Write;
         let (path, cidrs): (String, Vec<String>) = match self.lists_focus {
@@ -958,6 +983,10 @@ impl App {
                 self.blacklist_path.clone(),
                 self.blacklist_entries.iter().map(|e| e.cidr.clone()).collect(),
             ),
+        };
+        let _lock = match Self::try_lock_list(&path) {
+            Ok(guard) => guard,
+            Err(msg) => { self.set_lists_status(&msg); return; }
         };
         let tmp = format!("{}.tmp", path);
         match std::fs::File::create(&tmp) {
@@ -992,6 +1021,10 @@ impl App {
             ListsFocus::Whitelist => &self.whitelist_path,
             ListsFocus::Blacklist => &self.blacklist_path,
         };
+        let _lock = match Self::try_lock_list(path) {
+            Ok(guard) => guard,
+            Err(msg) => { self.set_lists_status(&msg); return; }
+        };
         match std::fs::OpenOptions::new().append(true).create(true).open(path) {
             Ok(mut f) => {
                 for line in lines {
@@ -1012,6 +1045,10 @@ impl App {
         let path = match target {
             ListsFocus::Whitelist => self.whitelist_path.clone(),
             ListsFocus::Blacklist => self.blacklist_path.clone(),
+        };
+        let _lock = match Self::try_lock_list(&path) {
+            Ok(guard) => guard,
+            Err(msg) => { self.set_lists_status(&msg); return; }
         };
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
