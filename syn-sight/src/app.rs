@@ -385,7 +385,6 @@ pub struct App {
     pub(crate) asn_countries: HashMap<String, String>,
     pub(crate) asn_names: HashMap<String, String>,
     pub(crate) prev_attacker_counts: HashMap<String, u64>,
-    pub(crate) prev_total_drops: u64,
     pub(crate) prev_total_drops_bpf: u64,
     pub(crate) asn_pps_history: HashMap<String, VecDeque<f64>>,
     pub(crate) asn_palette: Vec<(String, Color)>,
@@ -496,7 +495,6 @@ impl App {
             asn_countries: HashMap::new(),
             asn_names: HashMap::new(),
             prev_attacker_counts: HashMap::new(),
-            prev_total_drops: 0,
             prev_total_drops_bpf: 0,
             asn_pps_history: HashMap::new(),
             asn_palette: Vec::new(),
@@ -1681,42 +1679,40 @@ impl App {
         self.asn_names.get(asn).map(String::as_str).unwrap_or("")
     }
 
+    /// Compute per-ASN PPS from the full aggregate data and push to sparkline history.
+    ///
+    /// Uses `swarm_agg_entries` (built from the full BPF map before blacklist
+    /// filter and per-IP truncation) so the sparklines reflect the same ground
+    /// truth as the ASN aggregate table.  Skips updates until the ASN table has
+    /// loaded to prevent a misleading "Unknown" spike during startup.
     pub fn update_asn_pps(&mut self) {
-        let state = match &self.state {
-            Some(s) => s,
-            None => return,
-        };
-
-        let total_drops = state.metrics.total_drops;
-
-        // Only process when total_drops changes (daemon flushes every ~5s)
-        if total_drops == self.prev_total_drops {
+        // Don't produce sparkline data until the ASN table is loaded —
+        // without it all IPs map to "Unknown", creating a false spike.
+        if self.asn_table.is_none() {
             return;
         }
 
-        // Build current snapshot from swarm_entries: IP → count, IP → ASN
+        // Build current per-ASN totals from the full (unfiltered, untruncated) aggregate.
         let mut current: HashMap<String, u64> = HashMap::new();
-        let mut ip_to_asn: HashMap<String, String> = HashMap::new();
-        for e in &self.swarm_entries {
-            current.insert(e.ip.clone(), e.total_drops);
-            let asn = if e.asn.is_empty() { "Unknown" } else { &e.asn };
-            ip_to_asn.insert(e.ip.clone(), asn.to_string());
-            // Track country + name per ASN for sparkline labels.
-            self.asn_countries.entry(asn.to_string()).or_insert_with(|| e.country.clone());
-            self.asn_names.entry(asn.to_string()).or_insert_with(|| e.as_name.clone());
+        for agg in &self.swarm_agg_entries {
+            current.insert(agg.asn.clone(), agg.total_drops);
+            self.asn_countries
+                .entry(agg.asn.clone())
+                .or_insert_with(|| agg.country.clone());
+            self.asn_names
+                .entry(agg.asn.clone())
+                .or_insert_with(|| agg.as_name.clone());
         }
 
-        // Compute per-IP deltas, then group by ASN
+        // Per-ASN deltas (current total_drops − previous total_drops).
         let mut asn_deltas: HashMap<String, f64> = HashMap::new();
-        for (ip, &count) in &current {
-            let prev = self.prev_attacker_counts.get(ip).copied().unwrap_or(0);
-            if count > prev {
-                let asn = ip_to_asn.get(ip).cloned().unwrap_or_else(|| "Unknown".into());
-                *asn_deltas.entry(asn).or_insert(0.0) += (count - prev) as f64;
-            }
+        for (asn, &drops) in &current {
+            let prev = self.prev_attacker_counts.get(asn).copied().unwrap_or(0);
+            let delta = drops.saturating_sub(prev) as f64;
+            asn_deltas.insert(asn.clone(), delta);
         }
 
-        // Push per-ASN PPS to history; push 0.0 for inactive ASNs
+        // Merge with ASNs already in sparkline history so they get 0-delta (EMA decays).
         let all_asns: Vec<String> = self
             .asn_pps_history
             .keys()
@@ -1748,11 +1744,9 @@ impl App {
         for asn in &all_asns {
             let color = self.asn_velocity_color(asn);
             if color == Color::Red {
-                // Only set pulse if not already pulsing (avoid resetting countdown)
                 self.asn_bold_ticks.entry(asn.clone()).or_insert(3);
             }
         }
-        // Decrement all pulse counters; remove expired ones
         self.asn_bold_ticks.retain(|_, ticks| {
             *ticks = ticks.saturating_sub(1);
             *ticks > 0
@@ -1778,7 +1772,6 @@ impl App {
             .retain(|(asn, _)| self.asn_pps_history.contains_key(asn));
 
         self.prev_attacker_counts = current;
-        self.prev_total_drops = total_drops;
     }
 }
 
@@ -1813,18 +1806,15 @@ fn build_swarm_entries(
         entry.2 = true; // present in blacklist
     }
 
-    // Sort by count DESC, filtering blacklisted if requested
+    // Sort by count DESC
     let mut sorted: Vec<(u32, u64, u64, bool)> = merged
         .into_iter()
         .map(|(ip, (count, last_seen, is_bl))| (ip, count, last_seen, is_bl))
         .collect();
-    if hide_blacklisted {
-        sorted.retain(|&(_, _, _, is_bl)| !is_bl);
-    }
-    let filtered_total = sorted.len();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // ASN aggregation on the FULL filtered set (before truncation)
+    // ASN aggregation on the FULL set (before blacklist filter + truncation)
+    // so sparkline PPS and aggregate totals reflect all blocked traffic.
     let mut asn_map: HashMap<String, SwarmAsnEntry> = HashMap::new();
     for &(ip_nbo, count, last_seen, is_bl) in &sorted {
         let ip_hbo = u32::from_be(ip_nbo);
@@ -1861,7 +1851,12 @@ fn build_swarm_entries(
     let mut asn_entries: Vec<SwarmAsnEntry> = asn_map.into_values().collect();
     asn_entries.sort_by(|a, b| b.total_drops.cmp(&a.total_drops));
 
-    // Truncate per-IP list for rendering
+    // Apply blacklist filter + truncate for the per-IP list only.
+    // ASN aggregation above already captured the full picture.
+    if hide_blacklisted {
+        sorted.retain(|&(_, _, _, is_bl)| !is_bl);
+    }
+    let filtered_total = sorted.len();
     sorted.truncate(max_entries);
 
     // Enrich with ASN + country, format last_seen
@@ -2246,52 +2241,56 @@ mod tests {
     }
 
     #[test]
-    fn test_update_asn_pps_no_state() {
+    fn test_update_asn_pps_no_asn_table() {
+        // Without ASN table loaded, update_asn_pps should be a no-op.
         let mut app = App::new(None, String::new(), String::new(), String::new());
-        app.update_asn_pps(); // Should not panic
-        assert!(app.asn_pps_history.is_empty());
+        app.swarm_agg_entries = vec![SwarmAsnEntry {
+            asn: "Unknown".into(),
+            as_name: String::new(),
+            country: String::new(),
+            rir_country: String::new(),
+            ip_count: 1,
+            total_drops: 500,
+            last_seen_ns: 0,
+            has_blacklist: false,
+            has_dynamic: true,
+        }];
+        app.update_asn_pps();
+        assert!(app.asn_pps_history.is_empty()); // skipped — no ASN table
     }
 
     #[test]
     fn test_update_asn_pps_basic() {
-        use crate::protocol::{Metrics, SystemState};
+        use crate::asn_table::{AsnTable, AsnTableData, AsnEntry};
 
         let mut app = App::new(None, String::new(), String::new(), String::new());
-        app.state = Some(SystemState {
-            uptime_secs: 100,
-            metrics: Metrics {
-                total_drops: 1000,
-                latest_pps: 500,
-                active_blocks: 1,
-                blacklist_active: 0,
-            },
-            top_attackers: vec![],
-            top_ports: vec![],
-            ifaces: vec![],
-            instrumentation: Default::default(),
-        });
-        app.swarm_entries = vec![
-            forensics::SwarmEntry {
-                ip: "10.0.0.1".into(),
+        // Provide a minimal ASN table so update_asn_pps runs.
+        app.asn_table = Some(AsnTable::from_data(AsnTableData {
+            entries: vec![AsnEntry { start: 0, end: 0, asn: String::new(), country: String::new(), as_name: String::new() }],
+            asn_index: std::collections::HashMap::new(),
+        }));
+        app.swarm_agg_entries = vec![
+            SwarmAsnEntry {
                 asn: "AS1234".into(),
                 as_name: String::new(),
                 country: String::new(),
                 rir_country: String::new(),
+                ip_count: 3,
                 total_drops: 600,
-                last_seen_ago: "1s ago".into(),
                 last_seen_ns: 0,
-                reason: "Dynamic".into(),
+                has_blacklist: false,
+                has_dynamic: true,
             },
-            forensics::SwarmEntry {
-                ip: "10.0.0.2".into(),
+            SwarmAsnEntry {
                 asn: "AS5678".into(),
                 as_name: String::new(),
                 country: String::new(),
                 rir_country: String::new(),
+                ip_count: 2,
                 total_drops: 400,
-                last_seen_ago: "2s ago".into(),
                 last_seen_ns: 0,
-                reason: "Dynamic".into(),
+                has_blacklist: false,
+                has_dynamic: true,
             },
         ];
         app.update_asn_pps();
@@ -2304,37 +2303,30 @@ mod tests {
 
     #[test]
     fn test_update_asn_pps_skips_unchanged() {
-        use crate::protocol::{Metrics, SystemState};
+        use crate::asn_table::{AsnTable, AsnTableData, AsnEntry};
 
         let mut app = App::new(None, String::new(), String::new(), String::new());
-        app.state = Some(SystemState {
-            uptime_secs: 100,
-            metrics: Metrics {
-                total_drops: 1000,
-                latest_pps: 500,
-                active_blocks: 1,
-                blacklist_active: 0,
-            },
-            top_attackers: vec![],
-            top_ports: vec![],
-            ifaces: vec![],
-            instrumentation: Default::default(),
-        });
-        app.swarm_entries = vec![forensics::SwarmEntry {
-            ip: "10.0.0.1".into(),
+        app.asn_table = Some(AsnTable::from_data(AsnTableData {
+            entries: vec![AsnEntry { start: 0, end: 0, asn: String::new(), country: String::new(), as_name: String::new() }],
+            asn_index: std::collections::HashMap::new(),
+        }));
+        app.swarm_agg_entries = vec![SwarmAsnEntry {
             asn: "AS1234".into(),
             as_name: String::new(),
             country: String::new(),
             rir_country: String::new(),
+            ip_count: 1,
             total_drops: 600,
-            last_seen_ago: "1s ago".into(),
             last_seen_ns: 0,
-            reason: "Dynamic".into(),
+            has_blacklist: false,
+            has_dynamic: true,
         }];
         app.update_asn_pps();
-        // Same total_drops — should not update
+        // Same data again — delta is 0, EMA decays.
         app.update_asn_pps();
-        assert_eq!(app.asn_pps_history["AS1234"].len(), 1);
+        assert_eq!(app.asn_pps_history["AS1234"].len(), 2);
+        // Second sample: 0.3 * 0 + 0.7 * 180 = 126
+        assert!((app.asn_pps_history["AS1234"][1] - 126.0).abs() < 0.01);
     }
 
     #[test]
@@ -2623,13 +2615,13 @@ mod tests {
         let (result, total, _) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, false);
         assert_eq!(result.len(), 2);
         assert_eq!(total, 2);
-        // With filter: only ip2 (Dynamic) survives — ASN agg also reflects filtered set
+        // With filter: per-IP list hides blacklisted, but ASN agg sees full map
         let (result, total, agg) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, true);
         assert_eq!(result.len(), 1);
         assert_eq!(total, 1);
         assert_eq!(result[0].reason, "Dynamic");
         let agg_ip_total: usize = agg.iter().map(|a| a.ip_count).sum();
-        assert_eq!(agg_ip_total, 1); // only the non-blacklisted IP
+        assert_eq!(agg_ip_total, 2); // aggregate reflects full map (sparkline ground truth)
     }
 
     // --- ASN aggregation tests (via build_swarm_entries) ---
