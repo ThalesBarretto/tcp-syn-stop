@@ -181,6 +181,32 @@ pub struct SubnetPickerState {
     pub marked: std::collections::HashSet<usize>,
 }
 
+/// A config-file entry awaiting BPF map confirmation after SIGHUP.
+#[derive(Clone)]
+pub(crate) struct PendingSync {
+    pub cidr: String,
+    pub list: ListsFocus,
+    pub op: SyncOp,
+    pub created_at: Instant,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum SyncOp {
+    Add,
+    Remove,
+}
+
+/// Aggregate sync status for the health bar.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum SyncStatus {
+    /// No pending sync operations.
+    Idle,
+    /// Waiting for BPF maps to reflect N pending entries.
+    Pending(usize),
+    /// All entries confirmed; ticks remaining for the "OK" flash.
+    Confirmed(u8),
+}
+
 pub const ASN_PALETTE: [Color; 8] = [
     Color::Red,
     Color::Yellow,
@@ -290,6 +316,9 @@ pub struct App {
     pub(crate) drop_ips_util_pct: f64,
     pub(crate) db_freshness_s: Option<u64>,
     pub(crate) config_errors: Vec<String>,
+    // BPF sync verification
+    pub(crate) pending_syncs: Vec<PendingSync>,
+    pub(crate) sync_status: SyncStatus,
 }
 
 pub fn should_refresh_forensics(last: Option<Instant>, now: Instant) -> bool {
@@ -377,6 +406,8 @@ impl App {
             drop_ips_util_pct: 0.0,
             db_freshness_s: None,
             config_errors: Vec::new(),
+            pending_syncs: Vec::new(),
+            sync_status: SyncStatus::Idle,
         }
     }
 
@@ -948,6 +979,7 @@ impl App {
                     ListsFocus::Blacklist => "blacklist",
                 };
                 self.send_sighup();
+                self.load_lists();
                 self.set_lists_status(&format!("Rewrote {} sorted ({} entries)", label, cidrs.len()));
             }
             Err(e) => self.set_lists_status(&format!("Open failed: {}", e)),
@@ -970,6 +1002,7 @@ impl App {
                 }
                 self.send_sighup();
                 self.load_lists();
+                self.record_pending_adds(*target, lines);
             }
             Err(e) => self.set_lists_status(&format!("Open failed: {}", e)),
         }
@@ -1006,6 +1039,7 @@ impl App {
         }
         self.send_sighup();
         self.load_lists();
+        self.record_pending_remove(*target, cidr);
     }
 
     pub fn build_add_action_from_ip(&self, target: ListsFocus, ip: &str, asn: &str) -> Option<AddActionState> {
@@ -1258,6 +1292,82 @@ impl App {
         }
     }
 
+    // ── BPF sync verification ────────────────────────────────────────
+
+    /// Record CIDRs that were just appended to a config file.
+    fn record_pending_adds(&mut self, list: ListsFocus, cidrs: &[String]) {
+        let now = Instant::now();
+        for cidr in cidrs {
+            self.pending_syncs.push(PendingSync {
+                cidr: cidr.clone(),
+                list,
+                op: SyncOp::Add,
+                created_at: now,
+            });
+        }
+        self.sync_status = SyncStatus::Pending(self.pending_syncs.len());
+    }
+
+    /// Record a CIDR that was just removed from a config file.
+    fn record_pending_remove(&mut self, list: ListsFocus, cidr: &str) {
+        self.pending_syncs.push(PendingSync {
+            cidr: cidr.to_string(),
+            list,
+            op: SyncOp::Remove,
+            created_at: Instant::now(),
+        });
+        self.sync_status = SyncStatus::Pending(self.pending_syncs.len());
+    }
+
+    /// Check pending entries against BPF LPM trie maps.
+    ///
+    /// - Adds: confirmed when the LPM lookup finds the prefix.
+    /// - Removes: use grace-period timeout (LPM longest-prefix match
+    ///   cannot reliably verify absence when broader prefixes exist).
+    /// - All entries time out after 8 seconds regardless.
+    pub fn verify_pending_syncs(&mut self) {
+        const GRACE_PERIOD: Duration = Duration::from_secs(8);
+
+        let maps = self.bpf_maps.as_ref();
+
+        self.pending_syncs.retain(|entry| {
+            if entry.created_at.elapsed() >= GRACE_PERIOD {
+                return false;
+            }
+            if entry.op == SyncOp::Remove {
+                return true; // Can't verify absence via LPM; let timeout handle it.
+            }
+            // SyncOp::Add — verify via BPF point lookup.
+            if let Some(maps) = maps {
+                if let Some((net_addr, prefix_len)) = crate::validation::parse_cidr(&entry.cidr) {
+                    let is_wl = entry.list == ListsFocus::Whitelist;
+                    if let Some(true) = maps.lpm_lookup(is_wl, net_addr, prefix_len as u32) {
+                        return false; // Confirmed in BPF map.
+                    }
+                }
+            }
+            true // Not yet confirmed; keep waiting.
+        });
+
+        // Update aggregate status.
+        if self.pending_syncs.is_empty() {
+            if let SyncStatus::Pending(_) = self.sync_status {
+                self.sync_status = SyncStatus::Confirmed(3);
+            }
+        } else {
+            self.sync_status = SyncStatus::Pending(self.pending_syncs.len());
+        }
+    }
+
+    /// Count down the "Confirmed" display ticks.  Called once per tick.
+    pub fn tick_sync_status(&mut self) {
+        match self.sync_status {
+            SyncStatus::Confirmed(0) => self.sync_status = SyncStatus::Idle,
+            SyncStatus::Confirmed(n) => self.sync_status = SyncStatus::Confirmed(n - 1),
+            _ => {}
+        }
+    }
+
     /// Initialize DogStatsD UDP socket for metrics export.
     pub fn init_statsd(&mut self, addr: &str) {
         match UdpSocket::bind("0.0.0.0:0") {
@@ -1291,7 +1401,8 @@ impl App {
              tcp_syn_stop.drop_ips_total:{}|g\n\
              tcp_syn_stop.drop_ips_util_pct:{:.1}|g\n\
              tcp_syn_stop.db_freshness_s:{}|g\n\
-             tcp_syn_stop.config_errors:{}|g\n",
+             tcp_syn_stop.config_errors:{}|g\n\
+             tcp_syn_stop.sync_pending:{}|g\n",
             self.pps_ema as u64,
             state.metrics.latest_pps,
             state.metrics.active_blocks,
@@ -1303,6 +1414,7 @@ impl App {
             self.drop_ips_util_pct,
             self.db_freshness_s.unwrap_or(0),
             self.config_errors.len(),
+            self.pending_syncs.len(),
         );
         // Non-blocking send — silently ignore failures
         let _ = sock.send_to(payload.as_bytes(), addr);

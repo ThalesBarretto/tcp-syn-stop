@@ -16,6 +16,13 @@ pub struct DropInfo {
     pub count: u64,
 }
 
+/// LPM trie key — must match `struct lpm_key` in `tcp_syn_stop.bpf.c`.
+#[repr(C)]
+struct LpmKey {
+    prefixlen: u32,
+    ip: u32, // network byte order
+}
+
 /// Handles to pinned BPF maps (read-only).
 pub struct BpfMaps {
     drop_cnt: MapHandle,
@@ -23,6 +30,8 @@ pub struct BpfMaps {
     blacklist_cnt: MapHandle,
     rb_fail_cnt: MapHandle,
     port_drop_counts: Option<MapHandle>,
+    whitelist_lpm: Option<MapHandle>,
+    blacklist_lpm: Option<MapHandle>,
 }
 
 impl BpfMaps {
@@ -35,6 +44,8 @@ impl BpfMaps {
         };
 
         let port_drop_counts = open_map("port_drop_counts").ok();
+        let whitelist_lpm = open_map("whitelist").ok();
+        let blacklist_lpm = open_map("blacklist").ok();
 
         Ok(Self {
             drop_cnt: open_map("drop_cnt")?,
@@ -42,6 +53,8 @@ impl BpfMaps {
             blacklist_cnt: open_map("blacklist_cnt")?,
             rb_fail_cnt: open_map("rb_fail_cnt")?,
             port_drop_counts,
+            whitelist_lpm,
+            blacklist_lpm,
         })
     }
 
@@ -135,6 +148,35 @@ impl BpfMaps {
         Ok(entries)
     }
 
+    /// Check whether a CIDR prefix is present in the whitelist or blacklist
+    /// LPM trie.  Used to verify that the daemon has processed a config
+    /// reload after SIGHUP.
+    ///
+    /// `net_addr_hbo` is the network address in host byte order (as returned
+    /// by `validation::parse_cidr`).  Returns `None` if the map handle is
+    /// unavailable (daemon not running).
+    pub fn lpm_lookup(&self, is_whitelist: bool, net_addr_hbo: u32, prefix_len: u32) -> Option<bool> {
+        let map = if is_whitelist {
+            self.whitelist_lpm.as_ref()?
+        } else {
+            self.blacklist_lpm.as_ref()?
+        };
+        let key = LpmKey {
+            prefixlen: prefix_len,
+            ip: net_addr_hbo.to_be(),
+        };
+        let key_bytes = unsafe {
+            std::slice::from_raw_parts(
+                (&key as *const LpmKey).cast::<u8>(),
+                std::mem::size_of::<LpmKey>(),
+            )
+        };
+        match map.lookup(key_bytes, MapFlags::ANY) {
+            Ok(Some(_)) => Some(true),
+            Ok(None) => Some(false),
+            Err(_) => None,
+        }
+    }
 }
 
 /// Scan network interfaces for XDP program attachments.

@@ -238,6 +238,22 @@ pub(crate) fn build_health_line(app: &App) -> Line<'static> {
         format!("Waiting for daemon...{}", asn_indicator)
     };
 
+    // BPF sync status: transient indicator during config propagation
+    let sync_spans: Vec<Span<'static>> = match app.sync_status {
+        crate::app::SyncStatus::Idle => vec![],
+        crate::app::SyncStatus::Pending(n) => vec![
+            Span::styled(" Sync:", dim),
+            Span::styled(
+                format!("{n}.."),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+        ],
+        crate::app::SyncStatus::Confirmed(_) => vec![
+            Span::styled(" Sync:", dim),
+            Span::styled("OK", green),
+        ],
+    };
+
     let mut spans = vec![
         Span::styled(" BPF:", dim),
         Span::styled(bpf_label, bpf_style),
@@ -249,11 +265,14 @@ pub(crate) fn build_health_line(app: &App) -> Line<'static> {
         Span::styled(db_label, db_style),
         Span::styled(" ", dim),
         Span::styled(cfg_label, cfg_style),
+    ];
+    spans.extend(sync_spans);
+    spans.extend([
         Span::styled(" Fetch:", dim),
         Span::styled(fetch_label, fetch_style),
         Span::styled(" | ", dim),
         Span::styled(status_text, Style::default().fg(Color::Yellow)),
-    ];
+    ]);
 
     // Ephemeral help hint for first 10 seconds or until any key is pressed
     if !app.any_key_pressed && app.session_start.elapsed() < std::time::Duration::from_secs(10) {

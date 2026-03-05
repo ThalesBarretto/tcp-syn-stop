@@ -177,6 +177,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, tick_rate: Dur
                 }
             }
             let _ = app.fetch_data();
+            app.verify_pending_syncs();
+            app.tick_sync_status();
             app.emit_statsd();
             // DB freshness is on the HUD (all tabs), so always refresh forensics.
             app.fetch_forensics_async();
