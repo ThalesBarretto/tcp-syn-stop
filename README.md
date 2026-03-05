@@ -5,6 +5,9 @@
 
 This project provides a robust, 3-tier defense architecture designed to protect Linux servers from volumetric floods (TCP SYN, UDP garbage, Reflection Attacks) before they impact the system's CPU and networking stack.
 
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/6e42edb9-c182-4d04-911f-901c3bf7ef4b" />
+
+
 ## Components
 
 The suite consists of three components:
