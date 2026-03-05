@@ -8,7 +8,7 @@ license = "GPL-2.0-only"
 
 [dependencies]
 libbpf-rs  = "0.24"
-libbpf-sys = "1.6"
+libbpf-sys = { version = "1.6", features = ["vendored-zlib"] }
 clap       = { version = "4.5", features = ["derive"] }
 rusqlite   = { version = "0.31", features = ["bundled"] }
 lru        = "0.12"

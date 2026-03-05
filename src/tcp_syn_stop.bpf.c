@@ -34,8 +34,8 @@
 #include <bpf/bpf_endian.h>
 
 #define MAX_ENTRIES_LRU       65536
-#define MAX_ENTRIES_WHITELIST 1024
-#define MAX_ENTRIES_BLACKLIST 4096
+#define MAX_ENTRIES_WHITELIST 131072
+#define MAX_ENTRIES_BLACKLIST 131072
 #define SAMPLE_INTERVAL_NS   1000000   /* 1ms — max ~1K events/sec/CPU */
 #define ETH_P_IP 0x0800
 
@@ -208,7 +208,7 @@ int xdp_drop_spoofed_syns(struct xdp_md *ctx) {
     /* Manual blacklist: full L3 drop (all protocols, all ports).
      * Operator intent when blacklisting is total severance — a blacklist
      * that only blocks SYNs leaves ACK floods, scans, and established
-     * connections from the attacker untouched. */
+     * connections from the source untouched. */
     struct lpm_key bkey = {.prefixlen = 32, .ip = src_ip};
     if (bpf_map_lookup_elem(&blacklist, &bkey)) {
         /* Per-IP blacklist accounting */

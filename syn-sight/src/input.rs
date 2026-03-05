@@ -1,45 +1,49 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Keyboard event routing and input handling.
 //!
-//! Modal interception order: ASN search > add-action popup > Lists tab input.
+//! Modal interception order: fuzzy find > ASN search > add-action popup > Lists tab input.
 //! If no modal is active, all remaining keys (global and tab-specific) are
 //! dispatched through a single flat match, with internal tab guards on keys
 //! like `s`, `v`, `a`, `d` that only apply to specific tabs.
 
 use crate::app::{self, App, InputMode, ListsFocus, NeighborhoodSort, RoiViewMode, SwarmView, Tab};
 use crate::forensics;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 
 /// Top-level key dispatch. Returns true if the app should quit.
-pub fn handle_event(app: &mut App, key: KeyCode) -> bool {
+pub fn handle_event(app: &mut App, key: KeyEvent) -> bool {
     // Any keypress dismisses the ephemeral help hint
     app.any_key_pressed = true;
 
     // Help overlay intercepts all keys except Esc (to close)
     if app.show_help {
-        if key == KeyCode::Esc || key == KeyCode::Char('?') {
+        if key.code == KeyCode::Esc || key.code == KeyCode::Char('?') {
             app.show_help = false;
         }
         return false;
     }
 
+    // Fuzzy find intercepts all keys
+    if app.fuzzy_find.is_some() {
+        handle_fuzzy_find(app, key.code);
     // ASN search modal intercepts all keys
-    if app.asn_search.is_some() {
+    } else if app.asn_search.is_some() {
         handle_asn_search(app, key);
     // Subnet picker modal intercepts all keys
     } else if app.subnet_picker.is_some() {
         handle_subnet_picker(app, key);
     // Add-action popup intercepts all keys
     } else if app.add_action.is_some() {
-        handle_add_action(app, key);
+        handle_add_action(app, key.code);
     // Lists tab modal input
     } else if app.active_tab == Tab::Lists && app.lists_input_mode != InputMode::Normal {
-        handle_lists_input(app, key);
+        handle_lists_input(app, key.code);
     } else {
-        match key {
+        match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Tab => {
+                app.fuzzy_find = None;
                 app.active_tab = match app.active_tab {
                     Tab::Live => Tab::Forensics,
                     Tab::Forensics => Tab::Lists,
@@ -128,7 +132,7 @@ pub fn handle_event(app: &mut App, key: KeyCode) -> bool {
             }
             KeyCode::Char('b') | KeyCode::Char('w') => {
                 if app.active_tab == Tab::Live || app.active_tab == Tab::Forensics {
-                    let target = if key == KeyCode::Char('b') {
+                    let target = if key.code == KeyCode::Char('b') {
                         ListsFocus::Blacklist
                     } else {
                         ListsFocus::Whitelist
@@ -189,6 +193,28 @@ pub fn handle_event(app: &mut App, key: KeyCode) -> bool {
                 app.show_help = true;
             }
             KeyCode::Char('/') => {
+                if app.active_tab == Tab::Live || app.active_tab == Tab::Lists {
+                    let (current_scroll, total) = match app.active_tab {
+                        Tab::Live => match app.swarm_view {
+                            SwarmView::PerIP => (app.swarm_scroll, app.effective_swarm_len()),
+                            SwarmView::PerASN => (app.swarm_agg_scroll, app.swarm_agg_entries.len()),
+                        },
+                        Tab::Lists => match app.lists_focus {
+                            ListsFocus::Whitelist => (app.whitelist_scroll, app.whitelist_entries.len()),
+                            ListsFocus::Blacklist => (app.blacklist_scroll, app.blacklist_entries.len()),
+                        },
+                        _ => (0, 0),
+                    };
+                    app.fuzzy_find = Some(app::FuzzyFindState {
+                        query: String::new(),
+                        matched_indices: Vec::new(),
+                        scroll: current_scroll,
+                        saved_scroll: current_scroll,
+                        total,
+                    });
+                }
+            }
+            KeyCode::Char('n') => {
                 app.asn_search = Some(app::AsnSearchState {
                     query: String::new(),
                     results: Vec::new(),
@@ -211,6 +237,99 @@ pub fn handle_event(app: &mut App, key: KeyCode) -> bool {
         }
     }
     false
+}
+
+fn handle_fuzzy_find(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => {
+            if let Some(ff) = app.fuzzy_find.take() {
+                match app.active_tab {
+                    Tab::Live => match app.swarm_view {
+                        SwarmView::PerIP => app.swarm_scroll = ff.saved_scroll,
+                        SwarmView::PerASN => app.swarm_agg_scroll = ff.saved_scroll,
+                    },
+                    Tab::Lists => match app.lists_focus {
+                        ListsFocus::Whitelist => app.whitelist_scroll = ff.saved_scroll,
+                        ListsFocus::Blacklist => app.blacklist_scroll = ff.saved_scroll,
+                    },
+                    _ => {}
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(ff) = app.fuzzy_find.take() {
+                let idx = if ff.query.is_empty() {
+                    ff.scroll
+                } else {
+                    ff.matched_indices.get(ff.scroll).copied().unwrap_or(0)
+                };
+                match app.active_tab {
+                    Tab::Live => match app.swarm_view {
+                        SwarmView::PerIP => app.swarm_scroll = idx,
+                        SwarmView::PerASN => app.swarm_agg_scroll = idx,
+                    },
+                    Tab::Lists => match app.lists_focus {
+                        ListsFocus::Whitelist => app.whitelist_scroll = idx,
+                        ListsFocus::Blacklist => app.blacklist_scroll = idx,
+                    },
+                    _ => {}
+                }
+            }
+        }
+        KeyCode::Down => {
+            if let Some(ref mut ff) = app.fuzzy_find {
+                let len = if ff.query.is_empty() {
+                    ff.total
+                } else {
+                    ff.matched_indices.len()
+                };
+                if len > 0 && ff.scroll < len - 1 {
+                    ff.scroll += 1;
+                }
+            }
+        }
+        KeyCode::Up => {
+            if let Some(ref mut ff) = app.fuzzy_find {
+                if ff.scroll > 0 {
+                    ff.scroll -= 1;
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(ref mut ff) = app.fuzzy_find {
+                ff.query.pop();
+            }
+            app.run_fuzzy_find();
+        }
+        KeyCode::Left => {
+            if app.active_tab == Tab::Lists {
+                app.lists_focus = ListsFocus::Whitelist;
+                if let Some(ref mut ff) = app.fuzzy_find {
+                    ff.scroll = 0;
+                    ff.saved_scroll = app.whitelist_scroll;
+                }
+                app.run_fuzzy_find();
+            }
+        }
+        KeyCode::Right => {
+            if app.active_tab == Tab::Lists {
+                app.lists_focus = ListsFocus::Blacklist;
+                if let Some(ref mut ff) = app.fuzzy_find {
+                    ff.scroll = 0;
+                    ff.saved_scroll = app.blacklist_scroll;
+                }
+                app.run_fuzzy_find();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(ref mut ff) = app.fuzzy_find {
+                ff.query.push(c);
+                ff.scroll = 0;
+            }
+            app.run_fuzzy_find();
+        }
+        _ => {}
+    }
 }
 
 fn handle_lists_input(app: &mut App, key: KeyCode) {
@@ -299,8 +418,8 @@ fn handle_lists_input(app: &mut App, key: KeyCode) {
     }
 }
 
-fn handle_subnet_picker(app: &mut App, key: KeyCode) {
-    match key {
+fn handle_subnet_picker(app: &mut App, key: KeyEvent) {
+    match key.code {
         KeyCode::Esc => {
             app.subnet_picker = None;
         }
@@ -318,7 +437,7 @@ fn handle_subnet_picker(app: &mut App, key: KeyCode) {
                 }
             }
         }
-        KeyCode::Char(' ') => {
+        KeyCode::Tab => {
             if let Some(ref mut picker) = app.subnet_picker {
                 if !picker.cidrs.is_empty() {
                     let idx = picker.scroll;
@@ -334,7 +453,7 @@ fn handle_subnet_picker(app: &mut App, key: KeyCode) {
                 }
             }
         }
-        KeyCode::Char('a') => {
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
             // Toggle select-all
             if let Some(ref mut picker) = app.subnet_picker {
                 if picker.marked.len() == picker.cidrs.len() {
@@ -363,12 +482,12 @@ fn handle_subnet_picker(app: &mut App, key: KeyCode) {
     }
 }
 
-fn handle_asn_search(app: &mut App, key: KeyCode) {
-    match key {
+fn handle_asn_search(app: &mut App, key: KeyEvent) {
+    match key.code {
         KeyCode::Esc => {
             app.asn_search = None;
         }
-        KeyCode::Char(' ') => {
+        KeyCode::Tab => {
             // Toggle mark on current result
             if let Some(ref mut search) = app.asn_search {
                 if !search.results.is_empty() {
@@ -383,6 +502,18 @@ fn handle_asn_search(app: &mut App, key: KeyCode) {
                         search.scroll += 1;
                     }
                 }
+            }
+        }
+        KeyCode::Char('b') | KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => {
+            let target = if key.code == KeyCode::Char('w') {
+                ListsFocus::Whitelist
+            } else {
+                ListsFocus::Blacklist
+            };
+            let action = build_action_from_asn_search(app, target);
+            if action.is_some() {
+                app.asn_search = None;
+                app.add_action = action;
             }
         }
         KeyCode::Char(c) => {
@@ -413,59 +544,51 @@ fn handle_asn_search(app: &mut App, key: KeyCode) {
                 }
             }
         }
-        KeyCode::Enter => {
-            // Collect marked results (or just the current one if none marked)
-            let action = if let Some(ref search) = app.asn_search {
-                let selected_indices: Vec<usize> = if search.marked.is_empty() {
-                    vec![search.scroll]
-                } else {
-                    let mut v: Vec<usize> = search.marked.iter().copied().collect();
-                    v.sort();
-                    v
-                };
-
-                // Merge all CIDRs from all selected ASNs
-                let mut all_cidrs = Vec::new();
-                let mut labels = Vec::new();
-                for &idx in &selected_indices {
-                    if let Some(result) = search.results.get(idx) {
-                        let cidrs = app
-                            .asn_table
-                            .as_ref()
-                            .map(|t| t.find_all_by_asn(&result.asn))
-                            .unwrap_or_default();
-                        all_cidrs.extend(cidrs);
-                        labels.push(result.asn.clone());
-                    }
-                }
-
-                if !all_cidrs.is_empty() {
-                    let asn_label = if labels.len() == 1 {
-                        labels[0].clone()
-                    } else {
-                        format!("{} ASNs", labels.len())
-                    };
-                    let first_cidr = all_cidrs.first().cloned();
-                    Some(app::AddActionState {
-                        target: ListsFocus::Blacklist,
-                        ip_cidr: None,
-                        subnet_cidr: first_cidr,
-                        asn_label,
-                        asn_cidrs: all_cidrs,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if action.is_some() {
-                app.asn_search = None;
-                app.add_action = action;
-            }
-        }
         _ => {}
     }
+}
+
+fn build_action_from_asn_search(app: &App, target: ListsFocus) -> Option<app::AddActionState> {
+    let search = app.asn_search.as_ref()?;
+    let selected_indices: Vec<usize> = if search.marked.is_empty() {
+        vec![search.scroll]
+    } else {
+        let mut v: Vec<usize> = search.marked.iter().copied().collect();
+        v.sort();
+        v
+    };
+
+    let mut all_cidrs = Vec::new();
+    let mut labels = Vec::new();
+    for &idx in &selected_indices {
+        if let Some(result) = search.results.get(idx) {
+            let cidrs = app
+                .asn_table
+                .as_ref()
+                .map(|t| t.find_all_by_asn(&result.asn))
+                .unwrap_or_default();
+            all_cidrs.extend(cidrs);
+            labels.push(result.asn.clone());
+        }
+    }
+
+    if all_cidrs.is_empty() {
+        return None;
+    }
+
+    let asn_label = if labels.len() == 1 {
+        labels[0].clone()
+    } else {
+        format!("{} ASNs", labels.len())
+    };
+    let first_cidr = all_cidrs.first().cloned();
+    Some(app::AddActionState {
+        target,
+        ip_cidr: None,
+        subnet_cidr: first_cidr,
+        asn_label,
+        asn_cidrs: all_cidrs,
+    })
 }
 
 fn build_add_action_for_context(app: &App, target: ListsFocus) -> Option<app::AddActionState> {
@@ -588,6 +711,14 @@ fn handle_add_action(app: &mut App, key: KeyCode) {
 mod tests {
     use super::*;
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn alt_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
     fn test_app() -> App {
         App::new(None, String::new(), String::new(), String::new())
     }
@@ -595,18 +726,18 @@ mod tests {
     #[test]
     fn test_handle_event_quit() {
         let mut app = test_app();
-        assert!(handle_event(&mut app, KeyCode::Char('q')));
+        assert!(handle_event(&mut app, key(KeyCode::Char('q'))));
     }
 
     #[test]
     fn test_handle_event_tab_cycle() {
         let mut app = test_app();
         assert_eq!(app.active_tab, Tab::Live);
-        handle_event(&mut app, KeyCode::Tab);
+        handle_event(&mut app, key(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::Forensics);
-        handle_event(&mut app, KeyCode::Tab);
+        handle_event(&mut app, key(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::Lists);
-        handle_event(&mut app, KeyCode::Tab);
+        handle_event(&mut app, key(KeyCode::Tab));
         assert_eq!(app.active_tab, Tab::Live);
     }
 
@@ -638,11 +769,11 @@ mod tests {
             },
         ];
         assert_eq!(app.swarm_scroll, 0);
-        handle_event(&mut app, KeyCode::Down);
+        handle_event(&mut app, key(KeyCode::Down));
         assert_eq!(app.swarm_scroll, 1);
-        handle_event(&mut app, KeyCode::Down);
+        handle_event(&mut app, key(KeyCode::Down));
         assert_eq!(app.swarm_scroll, 1); // clamped
-        handle_event(&mut app, KeyCode::Up);
+        handle_event(&mut app, key(KeyCode::Up));
         assert_eq!(app.swarm_scroll, 0);
     }
 
@@ -651,11 +782,11 @@ mod tests {
         let mut app = test_app();
         app.active_tab = Tab::Forensics;
         assert_eq!(app.neighborhood_sort, NeighborhoodSort::Impact);
-        handle_event(&mut app, KeyCode::Char('s'));
+        handle_event(&mut app, key(KeyCode::Char('s')));
         assert_eq!(app.neighborhood_sort, NeighborhoodSort::Country);
-        handle_event(&mut app, KeyCode::Char('s'));
+        handle_event(&mut app, key(KeyCode::Char('s')));
         assert_eq!(app.neighborhood_sort, NeighborhoodSort::Name);
-        handle_event(&mut app, KeyCode::Char('s'));
+        handle_event(&mut app, key(KeyCode::Char('s')));
         assert_eq!(app.neighborhood_sort, NeighborhoodSort::Impact);
     }
 
@@ -663,10 +794,88 @@ mod tests {
     fn test_handle_event_search_open_close() {
         let mut app = test_app();
         assert!(app.asn_search.is_none());
-        handle_event(&mut app, KeyCode::Char('/'));
+        handle_event(&mut app, key(KeyCode::Char('n')));
         assert!(app.asn_search.is_some());
-        handle_event(&mut app, KeyCode::Esc);
+        handle_event(&mut app, key(KeyCode::Esc));
         assert!(app.asn_search.is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_find_open_close() {
+        let mut app = test_app();
+        assert!(app.fuzzy_find.is_none());
+        handle_event(&mut app, key(KeyCode::Char('/')));
+        assert!(app.fuzzy_find.is_some());
+        // Esc restores saved scroll
+        handle_event(&mut app, key(KeyCode::Esc));
+        assert!(app.fuzzy_find.is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_find_enter_commits() {
+        let mut app = test_app();
+        app.swarm_entries = vec![
+            crate::forensics::SwarmEntry {
+                ip: "1.1.1.1".into(),
+                asn: "AS1".into(),
+                as_name: String::new(),
+                country: "US".into(),
+                rir_country: String::new(),
+                total_drops: 100,
+                last_seen_ago: "3s ago".into(),
+                last_seen_ns: 0,
+                reason: "Dynamic".into(),
+            },
+            crate::forensics::SwarmEntry {
+                ip: "2.2.2.2".into(),
+                asn: "AS2".into(),
+                as_name: String::new(),
+                country: "DE".into(),
+                rir_country: String::new(),
+                total_drops: 200,
+                last_seen_ago: "1s ago".into(),
+                last_seen_ns: 0,
+                reason: "Dynamic".into(),
+            },
+        ];
+        app.swarm_scroll = 0;
+        handle_event(&mut app, key(KeyCode::Char('/')));
+        // Navigate down then Enter
+        handle_event(&mut app, key(KeyCode::Down));
+        handle_event(&mut app, key(KeyCode::Enter));
+        assert!(app.fuzzy_find.is_none());
+        assert_eq!(app.swarm_scroll, 1);
+    }
+
+    #[test]
+    fn test_fuzzy_find_typing() {
+        let mut app = test_app();
+        handle_event(&mut app, key(KeyCode::Char('/')));
+        assert!(app.fuzzy_find.is_some());
+        handle_event(&mut app, key(KeyCode::Char('t')));
+        handle_event(&mut app, key(KeyCode::Char('e')));
+        assert_eq!(app.fuzzy_find.as_ref().unwrap().query, "te");
+        handle_event(&mut app, key(KeyCode::Backspace));
+        assert_eq!(app.fuzzy_find.as_ref().unwrap().query, "t");
+    }
+
+    #[test]
+    fn test_fuzzy_find_tab_swallowed() {
+        // Tab is swallowed while fuzzy find is active (modal intercepts it)
+        let mut app = test_app();
+        handle_event(&mut app, key(KeyCode::Char('/')));
+        assert!(app.fuzzy_find.is_some());
+        handle_event(&mut app, key(KeyCode::Tab));
+        assert!(app.fuzzy_find.is_some()); // still open
+        assert_eq!(app.active_tab, Tab::Live); // tab didn't switch
+    }
+
+    #[test]
+    fn test_fuzzy_find_not_on_forensics() {
+        let mut app = test_app();
+        app.active_tab = Tab::Forensics;
+        handle_event(&mut app, key(KeyCode::Char('/')));
+        assert!(app.fuzzy_find.is_none());
     }
 
     #[test]
@@ -675,7 +884,7 @@ mod tests {
         app.active_tab = Tab::Lists;
         app.lists_input_mode = InputMode::Editing;
         app.lists_input_buf = "10.0.0".into();
-        handle_event(&mut app, KeyCode::Esc);
+        handle_event(&mut app, key(KeyCode::Esc));
         assert_eq!(app.lists_input_mode, InputMode::Normal);
         assert!(app.lists_input_buf.is_empty());
     }
@@ -703,7 +912,7 @@ mod tests {
             marked: std::collections::HashSet::new(),
             query_changed_at: None,
         });
-        handle_event(&mut app, KeyCode::Char(' '));
+        handle_event(&mut app, key(KeyCode::Tab));
         let search = app.asn_search.as_ref().unwrap();
         assert!(search.marked.contains(&0));
         assert_eq!(search.scroll, 1);
@@ -719,7 +928,7 @@ mod tests {
             asn_label: "AS1".into(),
             asn_cidrs: vec![],
         });
-        handle_event(&mut app, KeyCode::Esc);
+        handle_event(&mut app, key(KeyCode::Esc));
         assert!(app.add_action.is_none());
     }
 
@@ -743,7 +952,7 @@ mod tests {
             asn_label: "AS1".into(),
             asn_cidrs: vec!["1.2.0.0/16".into()],
         });
-        handle_event(&mut app, KeyCode::Char('1'));
+        handle_event(&mut app, key(KeyCode::Char('1')));
         assert!(app.add_action.is_none()); // consumed
         let content = std::fs::read_to_string(bl.path()).unwrap();
         assert!(content.contains("1.2.3.4/32"));
@@ -768,7 +977,7 @@ mod tests {
             asn_label: "AS1".into(),
             asn_cidrs: vec!["1.2.0.0/16".into()],
         });
-        handle_event(&mut app, KeyCode::Char('2'));
+        handle_event(&mut app, key(KeyCode::Char('2')));
         assert!(app.add_action.is_none());
         let content = std::fs::read_to_string(bl.path()).unwrap();
         assert!(content.contains("1.2.3.0/24"));
@@ -793,7 +1002,7 @@ mod tests {
             asn_label: "AS1".into(),
             asn_cidrs: vec!["1.2.0.0/16".into(), "5.6.0.0/16".into()],
         });
-        handle_event(&mut app, KeyCode::Char('3'));
+        handle_event(&mut app, key(KeyCode::Char('3')));
         // With >1 CIDRs, subnet picker opens instead of direct add
         assert!(app.add_action.is_none());
         assert!(app.subnet_picker.is_some());
@@ -821,7 +1030,7 @@ mod tests {
             asn_label: "AS1".into(),
             asn_cidrs: vec!["1.2.0.0/16".into()],
         });
-        handle_event(&mut app, KeyCode::Char('3'));
+        handle_event(&mut app, key(KeyCode::Char('3')));
         assert!(app.add_action.is_none());
         assert!(app.subnet_picker.is_none());
         let content = std::fs::read_to_string(bl.path()).unwrap();
@@ -845,9 +1054,9 @@ mod tests {
             scroll: 0,
             marked: std::collections::HashSet::new(),
         });
-        handle_event(&mut app, KeyCode::Char('a'));
+        handle_event(&mut app, alt_key(KeyCode::Char('a')));
         assert_eq!(app.subnet_picker.as_ref().unwrap().marked.len(), 2);
-        handle_event(&mut app, KeyCode::Enter);
+        handle_event(&mut app, key(KeyCode::Enter));
         assert!(app.subnet_picker.is_none());
         let content = std::fs::read_to_string(bl.path()).unwrap();
         assert!(content.contains("1.2.0.0/16"));
@@ -864,7 +1073,7 @@ mod tests {
             scroll: 0,
             marked: std::collections::HashSet::new(),
         });
-        handle_event(&mut app, KeyCode::Esc);
+        handle_event(&mut app, key(KeyCode::Esc));
         assert!(app.subnet_picker.is_none());
     }
 
@@ -885,7 +1094,7 @@ mod tests {
             scroll: 1,
             marked: std::collections::HashSet::new(),
         });
-        handle_event(&mut app, KeyCode::Enter);
+        handle_event(&mut app, key(KeyCode::Enter));
         assert!(app.subnet_picker.is_none());
         let content = std::fs::read_to_string(bl.path()).unwrap();
         assert!(!content.contains("1.2.0.0/16"));
@@ -902,7 +1111,7 @@ mod tests {
             scroll: 0,
             marked: std::collections::HashSet::new(),
         });
-        handle_event(&mut app, KeyCode::Char(' '));
+        handle_event(&mut app, key(KeyCode::Tab));
         let picker = app.subnet_picker.as_ref().unwrap();
         assert!(picker.marked.contains(&0));
         assert_eq!(picker.scroll, 1);
@@ -924,7 +1133,7 @@ mod tests {
         app.lists_focus = ListsFocus::Whitelist;
         app.whitelist_scroll = 0;
         app.lists_input_mode = InputMode::ConfirmDelete;
-        handle_event(&mut app, KeyCode::Char('y'));
+        handle_event(&mut app, key(KeyCode::Char('y')));
         assert_eq!(app.lists_input_mode, InputMode::Normal);
         let content = std::fs::read_to_string(wl.path()).unwrap();
         assert!(!content.contains("10.0.0.0/8"));
@@ -936,7 +1145,7 @@ mod tests {
         let mut app = test_app();
         app.active_tab = Tab::Lists;
         app.lists_input_mode = InputMode::ConfirmDelete;
-        handle_event(&mut app, KeyCode::Char('n'));
+        handle_event(&mut app, key(KeyCode::Char('n')));
         assert_eq!(app.lists_input_mode, InputMode::Normal);
     }
 
@@ -946,7 +1155,7 @@ mod tests {
         app.active_tab = Tab::Lists;
         app.lists_input_mode = InputMode::Editing;
         app.lists_input_buf = "10.0.0".into();
-        handle_event(&mut app, KeyCode::Backspace);
+        handle_event(&mut app, key(KeyCode::Backspace));
         assert_eq!(app.lists_input_buf, "10.0.");
     }
 
@@ -956,9 +1165,9 @@ mod tests {
         app.active_tab = Tab::Lists;
         app.lists_input_mode = InputMode::Editing;
         app.lists_input_buf.clear();
-        handle_event(&mut app, KeyCode::Char('1'));
-        handle_event(&mut app, KeyCode::Char('0'));
-        handle_event(&mut app, KeyCode::Char('.'));
+        handle_event(&mut app, key(KeyCode::Char('1')));
+        handle_event(&mut app, key(KeyCode::Char('0')));
+        handle_event(&mut app, key(KeyCode::Char('.')));
         assert_eq!(app.lists_input_buf, "10.");
     }
 
@@ -968,11 +1177,11 @@ mod tests {
         let mut app = test_app();
         app.active_tab = Tab::Forensics;
         assert_eq!(app.neighborhood_bot_threshold, BotThreshold::Two);
-        handle_event(&mut app, KeyCode::Char('t'));
+        handle_event(&mut app, key(KeyCode::Char('t')));
         assert_eq!(app.neighborhood_bot_threshold, BotThreshold::Five);
-        handle_event(&mut app, KeyCode::Char('t'));
+        handle_event(&mut app, key(KeyCode::Char('t')));
         assert_eq!(app.neighborhood_bot_threshold, BotThreshold::One);
-        handle_event(&mut app, KeyCode::Char('t'));
+        handle_event(&mut app, key(KeyCode::Char('t')));
         assert_eq!(app.neighborhood_bot_threshold, BotThreshold::Two);
     }
 
@@ -982,11 +1191,11 @@ mod tests {
         let mut app = test_app();
         app.active_tab = Tab::Forensics;
         assert_eq!(app.neighborhood_time_window, TimeWindow::OneHour);
-        handle_event(&mut app, KeyCode::Char('f'));
+        handle_event(&mut app, key(KeyCode::Char('f')));
         assert_eq!(app.neighborhood_time_window, TimeWindow::TwentyFourHour);
-        handle_event(&mut app, KeyCode::Char('f'));
+        handle_event(&mut app, key(KeyCode::Char('f')));
         assert_eq!(app.neighborhood_time_window, TimeWindow::FiveMin);
-        handle_event(&mut app, KeyCode::Char('f'));
+        handle_event(&mut app, key(KeyCode::Char('f')));
         assert_eq!(app.neighborhood_time_window, TimeWindow::OneHour);
     }
 
@@ -1010,9 +1219,9 @@ mod tests {
     fn test_g_toggles_swarm_view() {
         let mut app = test_app();
         assert_eq!(app.swarm_view, SwarmView::PerIP);
-        handle_event(&mut app, KeyCode::Char('g'));
+        handle_event(&mut app, key(KeyCode::Char('g')));
         assert_eq!(app.swarm_view, SwarmView::PerASN);
-        handle_event(&mut app, KeyCode::Char('g'));
+        handle_event(&mut app, key(KeyCode::Char('g')));
         assert_eq!(app.swarm_view, SwarmView::PerIP);
     }
 
@@ -1020,11 +1229,11 @@ mod tests {
     fn test_g_ignored_on_non_live_tabs() {
         let mut app = test_app();
         app.active_tab = Tab::Forensics;
-        handle_event(&mut app, KeyCode::Char('g'));
+        handle_event(&mut app, key(KeyCode::Char('g')));
         assert_eq!(app.swarm_view, SwarmView::PerIP);
 
         app.active_tab = Tab::Lists;
-        handle_event(&mut app, KeyCode::Char('g'));
+        handle_event(&mut app, key(KeyCode::Char('g')));
         assert_eq!(app.swarm_view, SwarmView::PerIP);
     }
 
@@ -1063,7 +1272,7 @@ mod tests {
         app.swarm_view = SwarmView::PerASN;
         app.swarm_agg_scroll = 0;
 
-        handle_event(&mut app, KeyCode::Enter);
+        handle_event(&mut app, key(KeyCode::Enter));
         assert_eq!(app.swarm_view, SwarmView::PerIP);
         assert_eq!(app.swarm_asn_filter.as_deref(), Some("AS2"));
         assert_eq!(app.swarm_scroll, 0);
@@ -1075,7 +1284,7 @@ mod tests {
         app.swarm_asn_filter = Some("AS1".into());
         app.swarm_view = SwarmView::PerIP;
 
-        handle_event(&mut app, KeyCode::Esc);
+        handle_event(&mut app, key(KeyCode::Esc));
         assert!(app.swarm_asn_filter.is_none());
         assert_eq!(app.swarm_view, SwarmView::PerASN);
         assert_eq!(app.swarm_agg_scroll, 0);
@@ -1087,7 +1296,7 @@ mod tests {
         app.swarm_view = SwarmView::PerIP;
         app.swarm_asn_filter = None;
 
-        handle_event(&mut app, KeyCode::Esc);
+        handle_event(&mut app, key(KeyCode::Esc));
         // Should not change view (no filter to clear)
         assert_eq!(app.swarm_view, SwarmView::PerIP);
     }
@@ -1121,11 +1330,11 @@ mod tests {
             },
         ];
         assert_eq!(app.swarm_agg_scroll, 0);
-        handle_event(&mut app, KeyCode::Down);
+        handle_event(&mut app, key(KeyCode::Down));
         assert_eq!(app.swarm_agg_scroll, 1);
-        handle_event(&mut app, KeyCode::Down);
+        handle_event(&mut app, key(KeyCode::Down));
         assert_eq!(app.swarm_agg_scroll, 1); // clamped
-        handle_event(&mut app, KeyCode::Up);
+        handle_event(&mut app, key(KeyCode::Up));
         assert_eq!(app.swarm_agg_scroll, 0);
     }
 }

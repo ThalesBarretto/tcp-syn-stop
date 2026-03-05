@@ -29,7 +29,7 @@ pub struct AsnEntry {
     pub as_name: String,
 }
 
-/// Max cached IP lookups. The active attacker set is bounded by
+/// Max cached IP lookups. The active sender set is bounded by
 /// MAX_AUTOBAN_IPS (16) in the daemon, but drop_ips holds up to 65536
 /// entries, so size the cache for realistic working-set access.
 const CACHE_CAP: usize = 2048;
@@ -37,7 +37,7 @@ const CACHE_CAP: usize = 2048;
 pub struct AsnTable {
     entries: Vec<AsnEntry>,
     /// IP → index into `entries` (or None for misses). Avoids repeated binary
-    /// searches for the same attacker IPs across refresh cycles.
+    /// searches for the same source IPs across refresh cycles.
     cache: RefCell<LruCache<u32, Option<usize>>>,
     /// ASN → indices into `entries`. Built at load time for O(k) lookups
     /// instead of O(n) linear scans.
@@ -127,7 +127,7 @@ impl AsnTable {
     }
 
     /// Find the entry whose range contains `ip` (host-byte-order u32).
-    /// Results are LRU-cached so repeat lookups for the same attacker IP
+    /// Results are LRU-cached so repeat lookups for the same source IP
     /// across refresh cycles are O(1) instead of O(log n) binary search.
     pub fn lookup(&self, ip: u32) -> Option<&AsnEntry> {
         if let Some(&cached) = self.cache.borrow_mut().get(&ip) {

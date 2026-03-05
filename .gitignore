@@ -12,6 +12,7 @@ build/
 
 # Rust build artifacts
 syn-sight/target/
+syn-intel/target/
 
 # Compiled binaries
 *.bin
@@ -37,6 +38,11 @@ debian/files
 debian/tcp-syn-stop/
 debian/*.substvars
 debian/*.postrm.debhelper
+
+# Arch build artifacts (bare git clone created by makepkg)
+archlinux/tcp-syn-stop/
+archlinux/src/
+archlinux/pkg/
 
 # Editor/IDE caches
 .cache/

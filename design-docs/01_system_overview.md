@@ -5,7 +5,7 @@ The `tcp-syn-stop` suite is a carrier-grade, eBPF-powered network security appli
 
 ## 2. The Threat Model
 Volumetric SYN floods target the stateful nature of the TCP three-way handshake.
--   **Spoofed Floods**: Attackers send millions of SYN packets with fake source IPs. The kernel allocates "SYN queues" for each, leading to memory exhaustion.
+-   **Spoofed Floods**: Remote hosts send millions of SYN packets with fake source IPs. The kernel allocates "SYN queues" for each, leading to memory exhaustion.
 -   **Reflection Attacks**: Malicious actors trick third-party servers into "reflecting" traffic toward a victim.
 -   **The traditional failure**: Standard firewalls (`iptables`, `nftables`) operate after the kernel has already performed significant processing (interrupt handling, sk_buff allocation), which consumes 100% CPU during high-PPS floods even if the packets are eventually dropped.
 
@@ -20,12 +20,12 @@ This suite implements a "Defense in Depth" strategy across three distinct layers
 
 ### Tier 2: ASN Auto-Ban (Neighborhood Defense)
 -   **Mechanism**: If multiple attacking IPs are detected within the same autonomous system (ASN), `syn-intel` blacklists the entire CIDR prefix.
--   **Logic**: Uses a tight CIDR alignment algorithm to ensure the ban covers the attacker's neighborhood without causing collateral damage to adjacent networks. Bans escalate with exponential backoff and decay after a quiet window.
+-   **Logic**: Uses a tight CIDR alignment algorithm to ensure the ban covers the sender's neighborhood without causing collateral damage to adjacent networks. Bans escalate with exponential backoff and decay after a quiet window.
 -   **Benefit**: Neutralizes botnets and distributed attacks by escalating from individual IPs to entire network segments.
 
 ### Tier 3: nftables Secondary Shield (The Policy Layer)
 -   **Mechanism**: Standard Linux `nftables` rules.
--   **Logic**: Provides rate-limiting for non-spoofed (real IP) attackers and secondary UDP flood protection for sensitive ports.
+-   **Logic**: Provides rate-limiting for non-spoofed (real IP) senders and secondary UDP flood protection for sensitive ports.
 -   **Benefit**: Ensures that even "legitimate" traffic cannot overwhelm the application layer.
 
 ## 4. Logical Components

@@ -1,0 +1,30 @@
+post_install() {
+    systemd-sysusers tcp-syn-stop.conf
+    systemd-tmpfiles --create tcp-syn-stop.conf
+
+    if [ -f /opt/tcp_syn_stop/ip2asn.db ]; then
+        chgrp tcp_syn_stop /opt/tcp_syn_stop/ip2asn.db
+        chmod g+rw /opt/tcp_syn_stop/ip2asn.db
+    fi
+
+    echo ":: Enable services with:"
+    echo "   systemctl enable --now tcp_syn_stop.service syn-intel.service"
+    echo "   systemctl enable --now tcp-syn-stop-asn-update.timer"
+}
+
+post_upgrade() {
+    systemd-sysusers tcp-syn-stop.conf
+    systemd-tmpfiles --create tcp-syn-stop.conf
+
+    if [ -f /opt/tcp_syn_stop/ip2asn.db ]; then
+        chgrp tcp_syn_stop /opt/tcp_syn_stop/ip2asn.db
+        chmod g+rw /opt/tcp_syn_stop/ip2asn.db
+    fi
+}
+
+post_remove() {
+    if [ -d /opt/tcp_syn_stop ]; then
+        echo ":: /opt/tcp_syn_stop may contain runtime data (databases, logs)."
+        echo "   Remove manually if no longer needed: rm -rf /opt/tcp_syn_stop"
+    fi
+}

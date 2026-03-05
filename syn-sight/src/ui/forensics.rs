@@ -379,7 +379,7 @@ fn render_drilldown_pane(f: &mut Frame, app: &App, area: ratatui::layout::Rect) 
             .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )
-    .block(Block::default().title(" Attacker IPs ").borders(Borders::ALL).border_type(BorderType::Rounded))
+    .block(Block::default().title(" Source IPs ").borders(Borders::ALL).border_type(BorderType::Rounded))
     .highlight_style(
         Style::default()
             .fg(Color::Black)

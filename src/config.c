@@ -11,8 +11,8 @@
 #include "utils.h"
 #include "config.h"
 
-#define MAX_CONFIG_ENTRIES  1024
-#define MAX_MAP_ENTRIES     4096  /* mirror of BPF-side MAX_ENTRIES_BLACKLIST */
+#define MAX_CONFIG_ENTRIES  131072
+#define MAX_MAP_ENTRIES     131072  /* mirror of BPF-side MAX_ENTRIES_BLACKLIST */
 /* "255.255.255.255/32" = 18 chars + ", " separator = 20 chars per entry */
 #define ELEMENTS_BUF_SIZE  (MAX_CONFIG_ENTRIES * 20 + 1)
 
@@ -31,17 +31,21 @@ static bool is_valid_nft_set_name(const char *name) {
  *
  * BPF map iterators are invalidated by bpf_map_delete_elem(); deleting
  * during iteration causes missed keys or double-visits.  Phase 1 collects
- * all keys into a stack array; Phase 2 deletes them after iteration ends.
+ * all keys into a heap-allocated array; Phase 2 deletes them after iteration ends.
  * Complexity: O(n) where n = map entries.
  * Threading: Main thread only (called during config reload under SIGHUP).
  */
 static void clear_bpf_map(int fd) {
-    struct lpm_key keys[MAX_MAP_ENTRIES];
+    struct lpm_key *keys = malloc(MAX_MAP_ENTRIES * sizeof(*keys));
+    if (!keys) {
+        log_msg(LEVEL_ERROR, "OOM: could not allocate key buffer for map clear");
+        return;
+    }
     struct lpm_key cur_key, next_key;
     bool first = true;
     int count = 0;
 
-    /* Phase 1: Collect all keys (whitelist ≤ 1024, blacklist ≤ 4096 including auto-ban entries). */
+    /* Phase 1: Collect all keys (whitelist/blacklist ≤ 131072 entries). */
     // cppcheck-suppress uninitvar ; cur_key is guarded by `first ? NULL : &cur_key`
     while (bpf_map_get_next_key(fd, first ? NULL : &cur_key, &next_key) == 0) {
         first = false;
@@ -55,6 +59,8 @@ static void clear_bpf_map(int fd) {
     for (int i = 0; i < count; i++) {
         bpf_map_delete_elem(fd, &keys[i]);
     }
+
+    free(keys);
 }
 
 void purge_whitelisted_drop_ips(int drop_ips_fd, int whitelist_fd)
@@ -99,7 +105,12 @@ void load_config_file(const char *filename, int map_fd, const char *nft_set_name
      * No BPF maps or nftables are touched until all entries have been
      * parsed and validated; the subsequent phases operate solely on the
      * lpm_key structs — no raw file content reaches the shell. */
-    struct lpm_key entries[MAX_CONFIG_ENTRIES];
+    struct lpm_key *entries = malloc(MAX_CONFIG_ENTRIES * sizeof(*entries));
+    if (!entries) {
+        log_msg(LEVEL_ERROR, "OOM: could not allocate config entry buffer");
+        fclose(f);
+        return;
+    }
     int count = 0;
     char *line = NULL;
     size_t len = 0;
@@ -152,6 +163,7 @@ void load_config_file(const char *filename, int map_fd, const char *nft_set_name
     if (bpf_errors > 0) {
         log_msg(LEVEL_ERROR, "BPF map update had %d errors — skipping nftables sync to prevent split state",
                 bpf_errors);
+        free(entries);
         return;
     }
 
@@ -162,6 +174,7 @@ void load_config_file(const char *filename, int map_fd, const char *nft_set_name
     char *elements_buf = malloc(ELEMENTS_BUF_SIZE);
     if (!elements_buf) {
         log_msg(LEVEL_ERROR, "OOM: could not allocate nftables element buffer");
+        free(entries);
         return;
     }
     int off = 0;
@@ -184,6 +197,7 @@ void load_config_file(const char *filename, int map_fd, const char *nft_set_name
     char *cmd = malloc(cmd_sz);
     if (!cmd) {
         log_msg(LEVEL_ERROR, "OOM: could not allocate nftables command buffer");
+        free(entries);
         free(elements_buf);
         return;
     }
@@ -191,6 +205,7 @@ void load_config_file(const char *filename, int map_fd, const char *nft_set_name
     struct nft_ctx *nft = nft_ctx_new(NFT_CTX_DEFAULT);
     if (!nft) {
         log_msg(LEVEL_ERROR, "load_config_file: failed to create libnftables context");
+        free(entries);
         free(elements_buf);
         free(cmd);
         return;
@@ -216,6 +231,7 @@ void load_config_file(const char *filename, int map_fd, const char *nft_set_name
     }
 
     nft_ctx_free(nft);
+    free(entries);
     free(elements_buf);
     free(cmd);
 }

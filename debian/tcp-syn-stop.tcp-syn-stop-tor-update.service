@@ -1,0 +1,14 @@
+[Unit]
+Description=Update Tor exit node blacklist for tcp-syn-stop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/opt/tcp_syn_stop/tcp-syn-stop-tor-update
+WorkingDirectory=/opt/tcp_syn_stop
+ProtectSystem=full
+ReadWritePaths=/etc/tcp_syn_stop
+ProtectHome=yes
+PrivateTmp=yes

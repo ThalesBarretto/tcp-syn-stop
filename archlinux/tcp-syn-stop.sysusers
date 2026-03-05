@@ -1,0 +1,3 @@
+g tcp_syn_stop - -
+u _syn_intel - "syn-intel policy engine" / /usr/sbin/nologin
+m _syn_intel tcp_syn_stop

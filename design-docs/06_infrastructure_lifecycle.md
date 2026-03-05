@@ -17,7 +17,8 @@ The project's `Makefile` handles the full lifecycle of the software:
 1.  **C Binary**: Compiled with hardening flags (`-fPIE`, `-fstack-protector-strong`, `FORTIFY_SOURCE`), linked with `-lcap`.
 2.  **Rust Binaries**: `syn-intel` and `syn-sight` are statically compiled using MUSL.
 3.  **Debian Package**: `dpkg-buildpackage` bundles binaries, systemd units, man pages, postinst, and configuration files into a standard `.deb`.
-4.  **Repository Metadata**: `apt-ftparchive` generates the `Packages` and `Release` files required for `apt-get install` compatibility.
+4.  **Arch Linux Package**: `archlinux/PKGBUILD` builds the suite via `makepkg`. Uses `musl-gcc` cross-compilation with `kernel-headers-musl` and `vendored-zlib` on `libbpf-sys` for fully static Rust binaries. Includes sysusers/tmpfiles configs and an install script for systemd service management.
+5.  **Repository Metadata**: `apt-ftparchive` generates the `Packages` and `Release` files required for `apt-get install` compatibility.
 
 ## 3. Operational Best Practices
 
@@ -28,6 +29,10 @@ The project's `Makefile` handles the full lifecycle of the software:
     sudo systemctl enable --now tcp_syn_stop
     sudo systemctl enable --now syn-intel
     ```
+
+### Automated Maintenance Services
+-   **ASN + RIR Data Refresh**: `tcp-syn-stop-asn-update.service`/`.timer` runs monthly. Fetches ip2asn TSV and 5 RIR delegation files, imports into SQLite via `syn-intel --import-asn` and `--import-rir`.
+-   **Tor Exit Node Blocking**: `tcp-syn-stop-tor-update.service`/`.timer` runs hourly (with 300s random delay). Fetches exit IPs from `check.torproject.org/exit-addresses`, strips old `# tor` tagged entries from `blacklist.conf`, appends fresh ones, sends SIGHUP. Comment tagging (`# tor` suffix) cleanly separates automated entries from manual ones.
 
 ### Monitoring & Maintenance
 -   **Live View**: Run `sudo syn-sight` for a real-time dashboard.

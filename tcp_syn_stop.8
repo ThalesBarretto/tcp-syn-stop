@@ -19,9 +19,9 @@ The system uses a 3-tier defense architecture:
 \fBeBPF/XDP Layer\fR: Drops packets from blacklisted IPs and dynamically identified spoofed sources at wire speed.
 Every drop is atomically counted per IP.
 .IP 2. 4
-\fBASN Auto-Ban\fR: \fBsyn-intel\fR automatically blocks entire subnet prefixes if multiple attacking IPs are identified from the same ASN.
+\fBASN Auto-Ban\fR: \fBsyn-intel\fR automatically blocks entire subnet prefixes if multiple flagged IPs are identified from the same ASN.
 .IP 3. 4
-\fBnftables Layer\fR: Provides rate-limiting for non-spoofed attackers and UDP flood protection.
+\fBnftables Layer\fR: Provides rate-limiting for non-spoofed senders and UDP flood protection.
 
 .SH OPTIONS
 .TP

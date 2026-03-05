@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 use super::country_color;
-use crate::app::{App, InputMode, ListsFocus};
+use crate::app::{App, BlacklistEntry, InputMode, ListEntry, ListsFocus};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -92,13 +92,35 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(chunks[2]);
 
-    // Whitelist table
-    let wl_rows: Vec<Row> = if app.whitelist_entries.is_empty() {
+    // Whitelist table (with fuzzy find filtering)
+    let wl_ff_active = app.lists_focus == ListsFocus::Whitelist && app.fuzzy_find.is_some();
+    let (wl_visible, wl_scroll): (Vec<&ListEntry>, usize) = if wl_ff_active {
+        let ff = app.fuzzy_find.as_ref().unwrap();
+        if !ff.query.is_empty() {
+            let filtered = ff.matched_indices.iter()
+                .filter_map(|&i| app.whitelist_entries.get(i))
+                .collect();
+            (filtered, ff.scroll)
+        } else {
+            (app.whitelist_entries.iter().collect(), ff.scroll)
+        }
+    } else {
+        (app.whitelist_entries.iter().collect(), app.whitelist_scroll)
+    };
+    let wl_count = wl_visible.len();
+
+    let wl_rows: Vec<Row> = if wl_visible.is_empty() {
         vec![Row::new(vec!["(empty)", "", "", "", ""]).style(Style::default().fg(Color::DarkGray))]
     } else {
-        app.whitelist_entries
+        wl_visible
             .iter()
-            .map(|entry| {
+            .enumerate()
+            .map(|(i, entry)| {
+                let style = if i == wl_scroll {
+                    Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
                 Row::new(vec![
                     Cell::from(entry.cidr.as_str()),
                     Cell::from(entry.country.as_str()),
@@ -109,7 +131,7 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
                     },
                     Cell::from(entry.asn.as_str()),
                     Cell::from(entry.as_name.as_str()).style(Style::default().fg(Color::DarkGray)),
-                ])
+                ]).style(style)
             })
             .collect()
     };
@@ -141,18 +163,40 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
             .border_style(wl_border),
     );
     let mut wl_state = TableState::default();
-    if app.lists_focus == ListsFocus::Whitelist && !app.whitelist_entries.is_empty() {
-        wl_state.select(Some(app.whitelist_scroll));
+    if app.lists_focus == ListsFocus::Whitelist && wl_count > 0 {
+        wl_state.select(Some(wl_scroll.min(wl_count - 1)));
     }
     f.render_stateful_widget(wl_table, table_chunks[0], &mut wl_state);
 
-    // Blacklist table
-    let bl_rows: Vec<Row> = if app.blacklist_entries.is_empty() {
+    // Blacklist table (with fuzzy find filtering)
+    let bl_ff_active = app.lists_focus == ListsFocus::Blacklist && app.fuzzy_find.is_some();
+    let (bl_visible, bl_scroll): (Vec<&BlacklistEntry>, usize) = if bl_ff_active {
+        let ff = app.fuzzy_find.as_ref().unwrap();
+        if !ff.query.is_empty() {
+            let filtered = ff.matched_indices.iter()
+                .filter_map(|&i| app.blacklist_entries.get(i))
+                .collect();
+            (filtered, ff.scroll)
+        } else {
+            (app.blacklist_entries.iter().collect(), ff.scroll)
+        }
+    } else {
+        (app.blacklist_entries.iter().collect(), app.blacklist_scroll)
+    };
+    let bl_count = bl_visible.len();
+
+    let bl_rows: Vec<Row> = if bl_visible.is_empty() {
         vec![Row::new(vec!["(empty)", "", "", "", "", ""]).style(Style::default().fg(Color::DarkGray))]
     } else {
-        app.blacklist_entries
+        bl_visible
             .iter()
-            .map(|entry| {
+            .enumerate()
+            .map(|(i, entry)| {
+                let style = if i == bl_scroll {
+                    Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
                 Row::new(vec![
                     Cell::from(entry.cidr.as_str()),
                     Cell::from(entry.country.as_str()),
@@ -164,7 +208,7 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
                     Cell::from(entry.asn.as_str()),
                     Cell::from(entry.as_name.as_str()).style(Style::default().fg(Color::DarkGray)),
                     Cell::from(entry.drop_count.to_string()),
-                ])
+                ]).style(style)
             })
             .collect()
     };
@@ -203,8 +247,8 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
             .border_style(bl_border),
     );
     let mut bl_state = TableState::default();
-    if app.lists_focus == ListsFocus::Blacklist && !app.blacklist_entries.is_empty() {
-        bl_state.select(Some(app.blacklist_scroll));
+    if app.lists_focus == ListsFocus::Blacklist && bl_count > 0 {
+        bl_state.select(Some(bl_scroll.min(bl_count - 1)));
     }
     f.render_stateful_widget(bl_table, table_chunks[1], &mut bl_state);
 

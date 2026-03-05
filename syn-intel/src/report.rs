@@ -8,7 +8,7 @@ use crate::metrics::TelemetrySnapshot;
 /// Log a human-readable summary at INFO level.
 pub fn log_report(snap: &TelemetrySnapshot) {
     let top_str: String = snap
-        .top_attackers
+        .top_senders
         .iter()
         .map(|a| {
             if a.asn.is_empty() {
@@ -35,7 +35,7 @@ pub fn json_report(snap: &TelemetrySnapshot) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::metrics::TopAttacker;
+    use crate::metrics::TopSender;
 
     fn sample_snap() -> TelemetrySnapshot {
         TelemetrySnapshot {
@@ -45,7 +45,7 @@ mod tests {
             drop_ips_count: 42,
             blacklist_active: 3,
             rb_fail_cnt: 0,
-            top_attackers: vec![TopAttacker {
+            top_senders: vec![TopSender {
                 ip: "10.0.0.1".to_string(),
                 count: 500,
                 asn: "AS1234".to_string(),
@@ -62,7 +62,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["pps"], 100);
         assert_eq!(parsed["total_drops"], 5000);
-        assert_eq!(parsed["top_attackers"][0]["ip"], "10.0.0.1");
-        assert_eq!(parsed["top_attackers"][0]["asn"], "AS1234");
+        assert_eq!(parsed["top_senders"][0]["ip"], "10.0.0.1");
+        assert_eq!(parsed["top_senders"][0]["asn"], "AS1234");
     }
 }

@@ -13,7 +13,7 @@ use crate::rir_table::{RirTable, RirTableData};
 use crate::ui::theme::Theme;
 use crate::forensics;
 use crate::forensics::SwarmEntry;
-use crate::protocol::{Attacker, IfaceInfo, Instrumentation, Metrics, SystemState};
+use crate::protocol::{Sender, IfaceInfo, Instrumentation, Metrics, SystemState};
 use crate::time_fmt;
 use anyhow::{anyhow, Result};
 use ratatui::style::Color;
@@ -73,6 +73,7 @@ pub enum InputMode {
 
 pub struct ListEntry {
     pub cidr: String,
+    pub comment: String,
     pub asn: String,
     pub as_name: String,
     pub country: String,
@@ -81,6 +82,7 @@ pub struct ListEntry {
 
 pub struct BlacklistEntry {
     pub cidr: String,
+    pub comment: String,
     pub drop_count: u64,
     pub asn: String,
     pub as_name: String,
@@ -167,6 +169,14 @@ pub struct AsnSearchState {
     pub scroll: usize,
     pub marked: std::collections::HashSet<usize>,
     pub query_changed_at: Option<Instant>,
+}
+
+pub(crate) struct FuzzyFindState {
+    pub query: String,
+    pub matched_indices: Vec<usize>,
+    pub scroll: usize,
+    pub saved_scroll: usize,
+    pub total: usize,
 }
 
 pub struct AddActionState {
@@ -384,8 +394,7 @@ pub struct App {
     // Per-ASN PPS tracking + BPF PPS delta
     pub(crate) asn_countries: HashMap<String, String>,
     pub(crate) asn_names: HashMap<String, String>,
-    pub(crate) prev_attacker_counts: HashMap<String, u64>,
-    pub(crate) prev_total_drops: u64,
+    pub(crate) prev_sender_counts: HashMap<String, u64>,
     pub(crate) prev_total_drops_bpf: u64,
     pub(crate) asn_pps_history: HashMap<String, VecDeque<f64>>,
     pub(crate) asn_palette: Vec<(String, Color)>,
@@ -397,6 +406,7 @@ pub struct App {
     pub(crate) add_action: Option<AddActionState>,
     pub(crate) subnet_picker: Option<SubnetPickerState>,
     pub(crate) asn_search: Option<AsnSearchState>,
+    pub(crate) fuzzy_find: Option<FuzzyFindState>,
     pub(crate) show_help: bool,
     // EMA smoothing
     pub(crate) pps_ema: f64,
@@ -495,8 +505,7 @@ impl App {
             drilldown_scroll: 0,
             asn_countries: HashMap::new(),
             asn_names: HashMap::new(),
-            prev_attacker_counts: HashMap::new(),
-            prev_total_drops: 0,
+            prev_sender_counts: HashMap::new(),
             prev_total_drops_bpf: 0,
             asn_pps_history: HashMap::new(),
             asn_palette: Vec::new(),
@@ -507,6 +516,7 @@ impl App {
             add_action: None,
             subnet_picker: None,
             asn_search: None,
+            fuzzy_find: None,
             show_help: false,
             pps_ema: 0.0,
             asn_pps_ema: HashMap::new(),
@@ -596,7 +606,7 @@ impl App {
         const EMA_ALPHA: f64 = 0.3;
         self.pps_ema = EMA_ALPHA * (pps as f64) + (1.0 - EMA_ALPHA) * self.pps_ema;
 
-        let top_attackers = top_k_attackers(&drop_ips, 5, self.asn_table.as_ref());
+        let top_senders = top_k_senders(&drop_ips, 5, self.asn_table.as_ref());
 
         // Top ports from BPF port_drop_counts map
         let top_ports = match maps.iter_port_counts() {
@@ -625,7 +635,7 @@ impl App {
                 active_blocks,
                 blacklist_active,
             },
-            top_attackers,
+            top_senders,
             top_ports,
             ifaces: bpf::detect_xdp_ifaces()
                 .into_iter()
@@ -899,6 +909,101 @@ impl App {
         }
     }
 
+    pub fn run_fuzzy_find(&mut self) {
+        use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+        use nucleo_matcher::{Config, Matcher, Utf32Str};
+
+        let total = match self.active_tab {
+            Tab::Live => match self.swarm_view {
+                SwarmView::PerIP => self.effective_swarm_len(),
+                SwarmView::PerASN => self.swarm_agg_entries.len(),
+            },
+            Tab::Lists => match self.lists_focus {
+                ListsFocus::Whitelist => self.whitelist_entries.len(),
+                ListsFocus::Blacklist => self.blacklist_entries.len(),
+            },
+            _ => 0,
+        };
+
+        let search = match self.fuzzy_find.as_mut() {
+            Some(s) => s,
+            None => return,
+        };
+        search.total = total;
+
+        if search.query.is_empty() {
+            search.matched_indices.clear();
+            if total > 0 && search.scroll >= total {
+                search.scroll = total - 1;
+            }
+            return;
+        }
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(&search.query, CaseMatching::Ignore, Normalization::Smart);
+        let mut buf = Vec::new();
+        let mut scored: Vec<(usize, u32)> = Vec::new();
+
+        match self.active_tab {
+            Tab::Live => match self.swarm_view {
+                SwarmView::PerIP => {
+                    let effective = self.effective_swarm_entries();
+                    for (i, e) in effective.iter().enumerate() {
+                        let hay = format!("{} AS{} {} {} {}", e.ip, e.asn, e.as_name, e.country, e.rir_country);
+                        buf.clear();
+                        let haystack = Utf32Str::new(&hay, &mut buf);
+                        if let Some(score) = pattern.score(haystack, &mut matcher) {
+                            scored.push((i, score));
+                        }
+                    }
+                }
+                SwarmView::PerASN => {
+                    for (i, e) in self.swarm_agg_entries.iter().enumerate() {
+                        let hay = format!("AS{} {} {} {}", e.asn, e.as_name, e.country, e.rir_country);
+                        buf.clear();
+                        let haystack = Utf32Str::new(&hay, &mut buf);
+                        if let Some(score) = pattern.score(haystack, &mut matcher) {
+                            scored.push((i, score));
+                        }
+                    }
+                }
+            },
+            Tab::Lists => match self.lists_focus {
+                ListsFocus::Whitelist => {
+                    for (i, e) in self.whitelist_entries.iter().enumerate() {
+                        let hay = format!("{} AS{} {} {} {}", e.cidr, e.asn, e.as_name, e.country, e.rir_country);
+                        buf.clear();
+                        let haystack = Utf32Str::new(&hay, &mut buf);
+                        if let Some(score) = pattern.score(haystack, &mut matcher) {
+                            scored.push((i, score));
+                        }
+                    }
+                }
+                ListsFocus::Blacklist => {
+                    for (i, e) in self.blacklist_entries.iter().enumerate() {
+                        let hay = format!("{} AS{} {} {} {}", e.cidr, e.asn, e.as_name, e.country, e.rir_country);
+                        buf.clear();
+                        let haystack = Utf32Str::new(&hay, &mut buf);
+                        if let Some(score) = pattern.score(haystack, &mut matcher) {
+                            scored.push((i, score));
+                        }
+                    }
+                }
+            },
+            _ => {}
+        }
+
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let search = self.fuzzy_find.as_mut().expect("checked above");
+        search.matched_indices = scored.into_iter().map(|(i, _)| i).collect();
+        if search.matched_indices.is_empty() {
+            search.scroll = 0;
+        } else if search.scroll >= search.matched_indices.len() {
+            search.scroll = search.matched_indices.len() - 1;
+        }
+    }
+
     pub fn sort_neighborhoods(&mut self) {
         match self.neighborhood_sort {
             NeighborhoodSort::Impact => {
@@ -1045,10 +1150,10 @@ impl App {
         let raw_wl = Self::read_cidr_file(&self.whitelist_path);
         self.whitelist_entries = raw_wl
             .into_iter()
-            .map(|cidr| {
+            .map(|(cidr, comment)| {
                 let (asn, as_name, country) = self.lookup_cidr_asn(&cidr);
                 let rir_country = self.lookup_cidr_rir_country(&cidr);
-                ListEntry { cidr, asn, as_name, country, rir_country }
+                ListEntry { cidr, comment, asn, as_name, country, rir_country }
             })
             .collect();
         self.whitelist_entries.sort_by(|a, b| {
@@ -1064,12 +1169,13 @@ impl App {
         let raw_bl = Self::read_cidr_file(&self.blacklist_path);
         self.blacklist_entries = raw_bl
             .into_iter()
-            .map(|cidr| {
+            .map(|(cidr, comment)| {
                 let drop_count = self.blacklist_drop_counts.get(&cidr).copied().unwrap_or(0);
                 let (asn, as_name, country) = self.lookup_cidr_asn(&cidr);
                 let rir_country = self.lookup_cidr_rir_country(&cidr);
                 BlacklistEntry {
                     cidr,
+                    comment,
                     drop_count,
                     asn,
                     as_name,
@@ -1118,13 +1224,28 @@ impl App {
         }
     }
 
-    fn read_cidr_file(path: &str) -> Vec<String> {
+    /// Read a CIDR config file, returning `(cidr, comment)` pairs.
+    /// The comment includes the `#` prefix (e.g., `"# tor"`) so it can be
+    /// written back verbatim by `rewrite_sorted`.  Full-line comments
+    /// (lines starting with `#`) are skipped.
+    fn read_cidr_file(path: &str) -> Vec<(String, String)> {
         match std::fs::read_to_string(path) {
             Ok(content) => content
                 .lines()
-                .map(|l| l.split('#').next().unwrap_or("").trim())
-                .filter(|l| !l.is_empty())
-                .map(String::from)
+                .filter_map(|l| {
+                    let trimmed = l.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        return None;
+                    }
+                    if let Some(pos) = trimmed.find('#') {
+                        let cidr = trimmed[..pos].trim().to_string();
+                        let comment = trimmed[pos..].to_string();
+                        if cidr.is_empty() { None } else { Some((cidr, comment)) }
+                    } else {
+                        let cidr = trimmed.to_string();
+                        if cidr.is_empty() { None } else { Some((cidr, String::new())) }
+                    }
+                })
                 .collect(),
             Err(_) => Vec::new(),
         }
@@ -1158,14 +1279,14 @@ impl App {
 
     pub fn rewrite_sorted(&mut self) {
         use std::io::Write;
-        let (path, cidrs): (String, Vec<String>) = match self.lists_focus {
+        let (path, lines): (String, Vec<(String, String)>) = match self.lists_focus {
             ListsFocus::Whitelist => (
                 self.whitelist_path.clone(),
-                self.whitelist_entries.iter().map(|e| e.cidr.clone()).collect(),
+                self.whitelist_entries.iter().map(|e| (e.cidr.clone(), e.comment.clone())).collect(),
             ),
             ListsFocus::Blacklist => (
                 self.blacklist_path.clone(),
-                self.blacklist_entries.iter().map(|e| e.cidr.clone()).collect(),
+                self.blacklist_entries.iter().map(|e| (e.cidr.clone(), e.comment.clone())).collect(),
             ),
         };
         let _lock = match Self::try_lock_list(&path) {
@@ -1175,8 +1296,13 @@ impl App {
         let tmp = format!("{}.tmp", path);
         match std::fs::File::create(&tmp) {
             Ok(mut f) => {
-                for cidr in &cidrs {
-                    if let Err(e) = writeln!(f, "{}", cidr) {
+                for (cidr, comment) in &lines {
+                    let line = if comment.is_empty() {
+                        cidr.to_string()
+                    } else {
+                        format!("{} {}", cidr, comment)
+                    };
+                    if let Err(e) = writeln!(f, "{}", line) {
                         self.set_lists_status(&format!("Write failed: {}", e));
                         let _ = std::fs::remove_file(&tmp);
                         return;
@@ -1193,7 +1319,7 @@ impl App {
                 };
                 self.send_sighup();
                 self.load_lists();
-                self.set_lists_status(&format!("Rewrote {} sorted ({} entries)", label, cidrs.len()));
+                self.set_lists_status(&format!("Rewrote {} sorted ({} entries)", label, lines.len()));
             }
             Err(e) => self.set_lists_status(&format!("Open failed: {}", e)),
         }
@@ -1681,42 +1807,40 @@ impl App {
         self.asn_names.get(asn).map(String::as_str).unwrap_or("")
     }
 
+    /// Compute per-ASN PPS from the full aggregate data and push to sparkline history.
+    ///
+    /// Uses `swarm_agg_entries` (built from the full BPF map before blacklist
+    /// filter and per-IP truncation) so the sparklines reflect the same ground
+    /// truth as the ASN aggregate table.  Skips updates until the ASN table has
+    /// loaded to prevent a misleading "Unknown" spike during startup.
     pub fn update_asn_pps(&mut self) {
-        let state = match &self.state {
-            Some(s) => s,
-            None => return,
-        };
-
-        let total_drops = state.metrics.total_drops;
-
-        // Only process when total_drops changes (daemon flushes every ~5s)
-        if total_drops == self.prev_total_drops {
+        // Don't produce sparkline data until the ASN table is loaded —
+        // without it all IPs map to "Unknown", creating a false spike.
+        if self.asn_table.is_none() {
             return;
         }
 
-        // Build current snapshot from swarm_entries: IP → count, IP → ASN
+        // Build current per-ASN totals from the full (unfiltered, untruncated) aggregate.
         let mut current: HashMap<String, u64> = HashMap::new();
-        let mut ip_to_asn: HashMap<String, String> = HashMap::new();
-        for e in &self.swarm_entries {
-            current.insert(e.ip.clone(), e.total_drops);
-            let asn = if e.asn.is_empty() { "Unknown" } else { &e.asn };
-            ip_to_asn.insert(e.ip.clone(), asn.to_string());
-            // Track country + name per ASN for sparkline labels.
-            self.asn_countries.entry(asn.to_string()).or_insert_with(|| e.country.clone());
-            self.asn_names.entry(asn.to_string()).or_insert_with(|| e.as_name.clone());
+        for agg in &self.swarm_agg_entries {
+            current.insert(agg.asn.clone(), agg.total_drops);
+            self.asn_countries
+                .entry(agg.asn.clone())
+                .or_insert_with(|| agg.country.clone());
+            self.asn_names
+                .entry(agg.asn.clone())
+                .or_insert_with(|| agg.as_name.clone());
         }
 
-        // Compute per-IP deltas, then group by ASN
+        // Per-ASN deltas (current total_drops − previous total_drops).
         let mut asn_deltas: HashMap<String, f64> = HashMap::new();
-        for (ip, &count) in &current {
-            let prev = self.prev_attacker_counts.get(ip).copied().unwrap_or(0);
-            if count > prev {
-                let asn = ip_to_asn.get(ip).cloned().unwrap_or_else(|| "Unknown".into());
-                *asn_deltas.entry(asn).or_insert(0.0) += (count - prev) as f64;
-            }
+        for (asn, &drops) in &current {
+            let prev = self.prev_sender_counts.get(asn).copied().unwrap_or(0);
+            let delta = drops.saturating_sub(prev) as f64;
+            asn_deltas.insert(asn.clone(), delta);
         }
 
-        // Push per-ASN PPS to history; push 0.0 for inactive ASNs
+        // Merge with ASNs already in sparkline history so they get 0-delta (EMA decays).
         let all_asns: Vec<String> = self
             .asn_pps_history
             .keys()
@@ -1748,11 +1872,9 @@ impl App {
         for asn in &all_asns {
             let color = self.asn_velocity_color(asn);
             if color == Color::Red {
-                // Only set pulse if not already pulsing (avoid resetting countdown)
                 self.asn_bold_ticks.entry(asn.clone()).or_insert(3);
             }
         }
-        // Decrement all pulse counters; remove expired ones
         self.asn_bold_ticks.retain(|_, ticks| {
             *ticks = ticks.saturating_sub(1);
             *ticks > 0
@@ -1777,8 +1899,7 @@ impl App {
         self.asn_palette
             .retain(|(asn, _)| self.asn_pps_history.contains_key(asn));
 
-        self.prev_attacker_counts = current;
-        self.prev_total_drops = total_drops;
+        self.prev_sender_counts = current;
     }
 }
 
@@ -1813,18 +1934,15 @@ fn build_swarm_entries(
         entry.2 = true; // present in blacklist
     }
 
-    // Sort by count DESC, filtering blacklisted if requested
+    // Sort by count DESC
     let mut sorted: Vec<(u32, u64, u64, bool)> = merged
         .into_iter()
         .map(|(ip, (count, last_seen, is_bl))| (ip, count, last_seen, is_bl))
         .collect();
-    if hide_blacklisted {
-        sorted.retain(|&(_, _, _, is_bl)| !is_bl);
-    }
-    let filtered_total = sorted.len();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // ASN aggregation on the FULL filtered set (before truncation)
+    // ASN aggregation on the FULL set (before blacklist filter + truncation)
+    // so sparkline PPS and aggregate totals reflect all blocked traffic.
     let mut asn_map: HashMap<String, SwarmAsnEntry> = HashMap::new();
     for &(ip_nbo, count, last_seen, is_bl) in &sorted {
         let ip_hbo = u32::from_be(ip_nbo);
@@ -1861,7 +1979,12 @@ fn build_swarm_entries(
     let mut asn_entries: Vec<SwarmAsnEntry> = asn_map.into_values().collect();
     asn_entries.sort_by(|a, b| b.total_drops.cmp(&a.total_drops));
 
-    // Truncate per-IP list for rendering
+    // Apply blacklist filter + truncate for the per-IP list only.
+    // ASN aggregation above already captured the full picture.
+    if hide_blacklisted {
+        sorted.retain(|&(_, _, _, is_bl)| !is_bl);
+    }
+    let filtered_total = sorted.len();
     sorted.truncate(max_entries);
 
     // Enrich with ASN + country, format last_seen
@@ -2002,8 +2125,8 @@ fn build_neighborhoods(
     result
 }
 
-/// Extract top-K attackers by drop count using a min-heap.
-fn top_k_attackers(entries: &[(u32, bpf::DropInfo)], k: usize, asn_table: Option<&AsnTable>) -> Vec<Attacker> {
+/// Extract top-K senders by drop count using a min-heap.
+fn top_k_senders(entries: &[(u32, bpf::DropInfo)], k: usize, asn_table: Option<&AsnTable>) -> Vec<Sender> {
     if k == 0 || entries.is_empty() {
         return Vec::new();
     }
@@ -2031,7 +2154,7 @@ fn top_k_attackers(entries: &[(u32, bpf::DropInfo)], k: usize, asn_table: Option
                 .and_then(|t| t.lookup(ip_hbo))
                 .map(|e| e.asn.clone())
                 .unwrap_or_default();
-            Attacker {
+            Sender {
                 ip: Ipv4Addr::from(ip_hbo).to_string(),
                 asn,
                 count,
@@ -2246,52 +2369,56 @@ mod tests {
     }
 
     #[test]
-    fn test_update_asn_pps_no_state() {
+    fn test_update_asn_pps_no_asn_table() {
+        // Without ASN table loaded, update_asn_pps should be a no-op.
         let mut app = App::new(None, String::new(), String::new(), String::new());
-        app.update_asn_pps(); // Should not panic
-        assert!(app.asn_pps_history.is_empty());
+        app.swarm_agg_entries = vec![SwarmAsnEntry {
+            asn: "Unknown".into(),
+            as_name: String::new(),
+            country: String::new(),
+            rir_country: String::new(),
+            ip_count: 1,
+            total_drops: 500,
+            last_seen_ns: 0,
+            has_blacklist: false,
+            has_dynamic: true,
+        }];
+        app.update_asn_pps();
+        assert!(app.asn_pps_history.is_empty()); // skipped — no ASN table
     }
 
     #[test]
     fn test_update_asn_pps_basic() {
-        use crate::protocol::{Metrics, SystemState};
+        use crate::asn_table::{AsnTable, AsnTableData, AsnEntry};
 
         let mut app = App::new(None, String::new(), String::new(), String::new());
-        app.state = Some(SystemState {
-            uptime_secs: 100,
-            metrics: Metrics {
-                total_drops: 1000,
-                latest_pps: 500,
-                active_blocks: 1,
-                blacklist_active: 0,
-            },
-            top_attackers: vec![],
-            top_ports: vec![],
-            ifaces: vec![],
-            instrumentation: Default::default(),
-        });
-        app.swarm_entries = vec![
-            forensics::SwarmEntry {
-                ip: "10.0.0.1".into(),
+        // Provide a minimal ASN table so update_asn_pps runs.
+        app.asn_table = Some(AsnTable::from_data(AsnTableData {
+            entries: vec![AsnEntry { start: 0, end: 0, asn: String::new(), country: String::new(), as_name: String::new() }],
+            asn_index: std::collections::HashMap::new(),
+        }));
+        app.swarm_agg_entries = vec![
+            SwarmAsnEntry {
                 asn: "AS1234".into(),
                 as_name: String::new(),
                 country: String::new(),
                 rir_country: String::new(),
+                ip_count: 3,
                 total_drops: 600,
-                last_seen_ago: "1s ago".into(),
                 last_seen_ns: 0,
-                reason: "Dynamic".into(),
+                has_blacklist: false,
+                has_dynamic: true,
             },
-            forensics::SwarmEntry {
-                ip: "10.0.0.2".into(),
+            SwarmAsnEntry {
                 asn: "AS5678".into(),
                 as_name: String::new(),
                 country: String::new(),
                 rir_country: String::new(),
+                ip_count: 2,
                 total_drops: 400,
-                last_seen_ago: "2s ago".into(),
                 last_seen_ns: 0,
-                reason: "Dynamic".into(),
+                has_blacklist: false,
+                has_dynamic: true,
             },
         ];
         app.update_asn_pps();
@@ -2304,37 +2431,30 @@ mod tests {
 
     #[test]
     fn test_update_asn_pps_skips_unchanged() {
-        use crate::protocol::{Metrics, SystemState};
+        use crate::asn_table::{AsnTable, AsnTableData, AsnEntry};
 
         let mut app = App::new(None, String::new(), String::new(), String::new());
-        app.state = Some(SystemState {
-            uptime_secs: 100,
-            metrics: Metrics {
-                total_drops: 1000,
-                latest_pps: 500,
-                active_blocks: 1,
-                blacklist_active: 0,
-            },
-            top_attackers: vec![],
-            top_ports: vec![],
-            ifaces: vec![],
-            instrumentation: Default::default(),
-        });
-        app.swarm_entries = vec![forensics::SwarmEntry {
-            ip: "10.0.0.1".into(),
+        app.asn_table = Some(AsnTable::from_data(AsnTableData {
+            entries: vec![AsnEntry { start: 0, end: 0, asn: String::new(), country: String::new(), as_name: String::new() }],
+            asn_index: std::collections::HashMap::new(),
+        }));
+        app.swarm_agg_entries = vec![SwarmAsnEntry {
             asn: "AS1234".into(),
             as_name: String::new(),
             country: String::new(),
             rir_country: String::new(),
+            ip_count: 1,
             total_drops: 600,
-            last_seen_ago: "1s ago".into(),
             last_seen_ns: 0,
-            reason: "Dynamic".into(),
+            has_blacklist: false,
+            has_dynamic: true,
         }];
         app.update_asn_pps();
-        // Same total_drops — should not update
+        // Same data again — delta is 0, EMA decays.
         app.update_asn_pps();
-        assert_eq!(app.asn_pps_history["AS1234"].len(), 1);
+        assert_eq!(app.asn_pps_history["AS1234"].len(), 2);
+        // Second sample: 0.3 * 0 + 0.7 * 180 = 126
+        assert!((app.asn_pps_history["AS1234"][1] - 126.0).abs() < 0.01);
     }
 
     #[test]
@@ -2464,7 +2584,10 @@ mod tests {
         )
         .unwrap();
         let result = App::read_cidr_file(tmp.path().to_str().unwrap());
-        assert_eq!(result, vec!["10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12"]);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], ("10.0.0.0/8".to_string(), String::new()));
+        assert_eq!(result[1], ("192.168.0.0/16".to_string(), "# inline note".to_string()));
+        assert_eq!(result[2], ("172.16.0.0/12".to_string(), String::new()));
     }
 
     #[test]
@@ -2525,6 +2648,43 @@ mod tests {
         app.remove_from_file(&ListsFocus::Whitelist, "10.0.0.0/8");
         // The .tmp file should not exist after successful rename
         assert!(!std::path::Path::new(&format!("{}.tmp", path)).exists());
+    }
+
+    #[test]
+    fn test_rewrite_sorted_preserves_comments() {
+        let wl = tempfile::NamedTempFile::new().unwrap();
+        let bl = tempfile::NamedTempFile::new().unwrap();
+        // Write entries with inline comments (like tor-update does)
+        std::fs::write(bl.path(), "2.2.2.2/32 # tor\n1.1.1.1/32\n3.3.3.3/32 # tor\n").unwrap();
+        let mut app = App::new(
+            None,
+            String::new(),
+            wl.path().to_str().unwrap().to_string(),
+            bl.path().to_str().unwrap().to_string(),
+        );
+        app.load_lists();
+        app.lists_focus = ListsFocus::Blacklist;
+        app.rewrite_sorted();
+        let content = std::fs::read_to_string(bl.path()).unwrap();
+        // Comments must survive the rewrite
+        assert!(content.contains("# tor"));
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // All tor-tagged entries keep their tags
+        let tor_count = lines.iter().filter(|l| l.contains("# tor")).count();
+        assert_eq!(tor_count, 2);
+    }
+
+    #[test]
+    fn test_read_cidr_file_preserves_tor_tags() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "1.1.1.1/32 # tor\n2.2.2.2/32\n# full comment\n").unwrap();
+        let result = App::read_cidr_file(tmp.path().to_str().unwrap());
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "1.1.1.1/32");
+        assert_eq!(result[0].1, "# tor");
+        assert_eq!(result[1].0, "2.2.2.2/32");
+        assert_eq!(result[1].1, "");
     }
 
     // --- build_swarm_entries tests ---
@@ -2623,13 +2783,13 @@ mod tests {
         let (result, total, _) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, false);
         assert_eq!(result.len(), 2);
         assert_eq!(total, 2);
-        // With filter: only ip2 (Dynamic) survives — ASN agg also reflects filtered set
+        // With filter: per-IP list hides blacklisted, but ASN agg sees full map
         let (result, total, agg) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, true);
         assert_eq!(result.len(), 1);
         assert_eq!(total, 1);
         assert_eq!(result[0].reason, "Dynamic");
         let agg_ip_total: usize = agg.iter().map(|a| a.ip_count).sum();
-        assert_eq!(agg_ip_total, 1); // only the non-blacklisted IP
+        assert_eq!(agg_ip_total, 2); // aggregate reflects full map (sparkline ground truth)
     }
 
     // --- ASN aggregation tests (via build_swarm_entries) ---
@@ -2916,6 +3076,7 @@ mod tests {
         ];
         let entries = vec![BlacklistEntry {
             cidr: "10.0.0.0/24".to_string(),
+            comment: String::new(),
             drop_count: 0,
             asn: String::new(),
             as_name: String::new(),
@@ -2935,6 +3096,7 @@ mod tests {
         ];
         let entries = vec![BlacklistEntry {
             cidr: "10.0.0.0/24".to_string(),
+            comment: String::new(),
             drop_count: 0,
             asn: String::new(),
             as_name: String::new(),
@@ -2954,6 +3116,7 @@ mod tests {
         ];
         let entries = vec![BlacklistEntry {
             cidr: "10.0.0.1/32".to_string(),
+            comment: String::new(),
             drop_count: 0,
             asn: String::new(),
             as_name: String::new(),

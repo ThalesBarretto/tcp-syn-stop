@@ -17,7 +17,7 @@ pub struct Metrics {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Attacker {
+pub struct Sender {
     pub ip: String,
     pub asn: String,
     pub count: u64,
@@ -56,7 +56,7 @@ pub struct Instrumentation {
 pub struct SystemState {
     pub uptime_secs: u64,
     pub metrics: Metrics,
-    pub top_attackers: Vec<Attacker>,
+    pub top_senders: Vec<Sender>,
     pub top_ports: Vec<PortStat>,
     pub ifaces: Vec<IfaceInfo>,
     pub instrumentation: Instrumentation,

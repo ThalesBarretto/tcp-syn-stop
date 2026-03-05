@@ -784,12 +784,13 @@ dependencies = [
 
 [[package]]
 name = "syn-sight"
-version = "11.0.1"
+version = "13.0.2"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
  "libbpf-rs",
+ "libbpf-sys",
  "libc",
  "lru",
  "nucleo-matcher",

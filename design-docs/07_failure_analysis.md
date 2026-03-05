@@ -22,11 +22,11 @@ Including ringbuffer overhead (8-byte header per record), each event consumes 16
 ### `drop_ips` (LRU Hash)
 - **Size**: 65,536 entries.
 - **Behavior**: Being an `LRU_HASH`, the map never "fills up" in a way that returns an error. When the capacity is reached, the kernel automatically evicts the **Least Recently Used** entry to make room for the new one.
-- **Consequence**: Under a massive attack from >65k unique IPs, the system will exhibit "thrashing." Older attackers will be unblocked prematurely to make room for newer ones. This is a graceful degradation that prevents memory exhaustion.
+- **Consequence**: Under a massive attack from >65k unique IPs, the system will exhibit "thrashing." Older senders will be unblocked prematurely to make room for newer ones. This is a graceful degradation that prevents memory exhaustion.
 
 ### `blacklist` (LPM Trie)
-- **Size**: 4,096 entries.
-- **Behavior**: Unlike the LRU hash, an `LPM_TRIE` is a fixed-size tree. If `syn-intel` attempts to insert a 4,097th subnet block (via Auto-Ban), the BPF syscall will return `-ENOSPC`.
+- **Size**: 131,072 entries.
+- **Behavior**: Unlike the LRU hash, an `LPM_TRIE` is a fixed-size tree. If `syn-intel` attempts to insert beyond the 131,072 entry limit (via Auto-Ban), the BPF syscall will return `-ENOSPC`.
 - **Consequence**: New Auto-Bans will fail to apply. `syn-intel` logs a `warn!` but continues running. Existing blocks remain active.
 
 ## 3. Clock Anomalies & Monotonicity

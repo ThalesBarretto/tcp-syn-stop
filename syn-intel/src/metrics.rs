@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! PPS computation and top-K attacker extraction.
+//! PPS computation and top-K sender extraction.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -18,11 +18,11 @@ pub struct TelemetrySnapshot {
     pub drop_ips_count: usize,
     pub blacklist_active: u32,
     pub rb_fail_cnt: u64,
-    pub top_attackers: Vec<TopAttacker>,
+    pub top_senders: Vec<TopSender>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct TopAttacker {
+pub struct TopSender {
     pub ip: String,
     pub count: u64,
     pub asn: String,
@@ -55,9 +55,9 @@ impl MetricsState {
     }
 }
 
-/// Extract the top-K attackers by drop count using a min-heap.
+/// Extract the top-K senders by drop count using a min-heap.
 /// IPs are converted from network byte order to host byte order for ASN lookup.
-pub fn top_k_attackers(entries: &[(u32, DropInfo)], k: usize, asn_table: Option<&AsnTable>) -> Vec<TopAttacker> {
+pub fn top_k_senders(entries: &[(u32, DropInfo)], k: usize, asn_table: Option<&AsnTable>) -> Vec<TopSender> {
     if k == 0 || entries.is_empty() {
         return Vec::new();
     }
@@ -88,7 +88,7 @@ pub fn top_k_attackers(entries: &[(u32, DropInfo)], k: usize, asn_table: Option<
                 .and_then(|t| t.lookup(ip_hbo))
                 .map(|e| (e.asn.clone(), e.country.clone(), e.as_name.clone()))
                 .unwrap_or_default();
-            TopAttacker {
+            TopSender {
                 ip: Ipv4Addr::from(ip_hbo).to_string(),
                 count,
                 asn,
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_top_k_empty() {
-        let result = top_k_attackers(&[], 5, None);
+        let result = top_k_senders(&[], 5, None);
         assert!(result.is_empty());
     }
 
@@ -139,7 +139,7 @@ mod tests {
                 count: 10,
             },
         )];
-        let result = top_k_attackers(&entries, 0, None);
+        let result = top_k_senders(&entries, 0, None);
         assert!(result.is_empty());
     }
 
@@ -161,7 +161,7 @@ mod tests {
                 },
             ),
         ];
-        let result = top_k_attackers(&entries, 5, None);
+        let result = top_k_senders(&entries, 5, None);
         assert_eq!(result.len(), 2);
         // Sorted descending by count
         assert_eq!(result[0].count, 20);
@@ -193,7 +193,7 @@ mod tests {
                 },
             ),
         ];
-        let result = top_k_attackers(&entries, 3, None);
+        let result = top_k_senders(&entries, 3, None);
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].count, 200);
         assert_eq!(result[1].count, 100);
@@ -233,7 +233,7 @@ mod tests {
             ),
             (0x0A000005u32.to_be(), DropInfo { last_seen: 0, count: 1 }),
         ];
-        let result = top_k_attackers(&entries, 2, None);
+        let result = top_k_senders(&entries, 2, None);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].count, 300);
         assert_eq!(result[1].count, 200);
@@ -250,7 +250,7 @@ mod tests {
                 count: 42,
             },
         )];
-        let result = top_k_attackers(&entries, 1, None);
+        let result = top_k_senders(&entries, 1, None);
         assert_eq!(result[0].ip, "10.0.0.1");
     }
 }

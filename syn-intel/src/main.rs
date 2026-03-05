@@ -2,7 +2,7 @@
 //! syn-intel — BPF policy engine for tcp_syn_stop.
 //!
 //! Consumes the BPF ringbuffer, manages TTL expiry of dynamic blocks,
-//! computes telemetry (PPS, top-K attackers), and logs structured reports.
+//! computes telemetry (PPS, top-K senders), and logs structured reports.
 
 mod asn_table;
 mod autoban;
@@ -345,7 +345,7 @@ fn main() -> Result<()> {
             Some(table)
         }
         None => {
-            warn!("ASN table not available at {} — attacker IPs will lack ASN info", args.db_path);
+            warn!("ASN table not available at {} — source IPs will lack ASN info", args.db_path);
             None
         }
     };
@@ -604,7 +604,7 @@ fn poll_tick(
     let drop_ips_count = drop_ips.len();
     let blacklist_active = maps.count_blacklist()?;
     let rb_fail_cnt = maps.read_rb_fail_cnt()?;
-    let top_attackers = metrics::top_k_attackers(drop_ips, 5, asn_table);
+    let top_senders = metrics::top_k_senders(drop_ips, 5, asn_table);
 
     debug!(
         "active_blocks={} heap_size={} heap_drops={} autoban_active={}",
@@ -627,7 +627,7 @@ fn poll_tick(
         drop_ips_count,
         blacklist_active,
         rb_fail_cnt,
-        top_attackers,
+        top_senders,
     })
 }
 

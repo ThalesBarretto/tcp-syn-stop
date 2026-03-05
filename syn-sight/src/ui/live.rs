@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 use super::{country_color, sparkline_spans};
-use crate::app::{App, SwarmView};
+use crate::app::{App, SwarmAsnEntry, SwarmView};
+use crate::forensics::SwarmEntry;
 use crate::time_fmt;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -205,7 +206,17 @@ pub fn render_live(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
-    let entries = app.effective_swarm_entries();
+    let base_entries = app.effective_swarm_entries();
+    let (entries, scroll_pos): (Vec<&SwarmEntry>, usize) = match &app.fuzzy_find {
+        Some(ff) if !ff.query.is_empty() => {
+            let filtered = ff.matched_indices.iter()
+                .filter_map(|&i| base_entries.get(i).copied())
+                .collect();
+            (filtered, ff.scroll)
+        }
+        Some(ff) => (base_entries, ff.scroll),
+        None => (base_entries, app.swarm_scroll),
+    };
     let entry_count = entries.len();
 
     let dim_hint = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
@@ -272,7 +283,7 @@ fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let style = if i == app.swarm_scroll {
+            let style = if i == scroll_pos {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -305,7 +316,7 @@ fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
 
     let mut table_state = TableState::default();
     if entry_count > 0 {
-        table_state.select(Some(app.swarm_scroll));
+        table_state.select(Some(scroll_pos.min(entry_count - 1)));
     }
 
     let table = Table::new(
@@ -337,8 +348,19 @@ fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_swarm_aggregate(f: &mut Frame, app: &App, area: Rect) {
-    let agg_count = app.swarm_agg_entries.len();
-    let total_ips: usize = app.swarm_agg_entries.iter().map(|e| e.ip_count).sum();
+    let all_agg = &app.swarm_agg_entries;
+    let (agg_entries, scroll_pos): (Vec<&SwarmAsnEntry>, usize) = match &app.fuzzy_find {
+        Some(ff) if !ff.query.is_empty() => {
+            let filtered = ff.matched_indices.iter()
+                .filter_map(|&i| all_agg.get(i))
+                .collect();
+            (filtered, ff.scroll)
+        }
+        Some(ff) => (all_agg.iter().collect(), ff.scroll),
+        None => (all_agg.iter().collect(), app.swarm_agg_scroll),
+    };
+    let agg_count = agg_entries.len();
+    let total_ips: usize = agg_entries.iter().map(|e| e.ip_count).sum();
     let dim_hint = Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
     let filter_hint = if app.hide_blacklisted {
         Span::styled("[f] show blacklisted ", dim_hint)
@@ -353,12 +375,11 @@ fn render_swarm_aggregate(f: &mut Frame, app: &App, area: Rect) {
 
     let now_ns = time_fmt::clock_boottime_ns();
 
-    let swarm_rows: Vec<Row> = app
-        .swarm_agg_entries
+    let swarm_rows: Vec<Row> = agg_entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let style = if i == app.swarm_agg_scroll {
+            let style = if i == scroll_pos {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -396,7 +417,7 @@ fn render_swarm_aggregate(f: &mut Frame, app: &App, area: Rect) {
 
     let mut table_state = TableState::default();
     if agg_count > 0 {
-        table_state.select(Some(app.swarm_agg_scroll));
+        table_state.select(Some(scroll_pos.min(agg_count - 1)));
     }
 
     let table = Table::new(

@@ -1,0 +1,108 @@
+# Maintainer: Your Name <your@email.com>
+# In-tree PKGBUILD — run `makepkg -si` from this directory.
+# Requires: rustup target add x86_64-unknown-linux-musl
+
+pkgname=tcp-syn-stop
+pkgver=12.2
+pkgrel=1
+pkgdesc='High-performance eBPF TCP SYN flood protection daemon'
+arch=('x86_64')
+url='https://github.com/placeholder/tcp-syn-stop'
+license=('GPL-2.0-only')
+depends=('libbpf' 'libelf' 'zlib' 'nftables' 'libcap' 'curl')
+makedepends=('clang' 'llvm' 'bpf' 'linux-headers' 'kernel-headers-musl' 'rustup' 'musl' 'git')
+optdepends=('logrotate: automatic log rotation')
+backup=('etc/tcp_syn_stop/whitelist.conf'
+        'etc/tcp_syn_stop/blacklist.conf'
+        'etc/tcp_syn_stop/tcp_syn_stop.conf'
+        'etc/default/tcp-syn-stop'
+        'etc/default/syn-intel')
+install=tcp-syn-stop.install
+source=("$pkgname::git+file://$PWD/.."
+        'tcp-syn-stop.sysusers'
+        'tcp-syn-stop.tmpfiles')
+sha256sums=('SKIP'
+            'SKIP'
+            'SKIP')
+
+_musl_target="${CARCH}-unknown-linux-musl"
+
+build() {
+    cd "$srcdir/$pkgname"
+
+    export "CC_${CARCH}_unknown_linux_musl=musl-gcc"
+    # musl-gcc sysroot lacks libelf/zlib/kernel headers; expose system includes
+    export C_INCLUDE_PATH=/usr/include
+    export RUST_BACKTRACE=1
+    # C BPF loader daemon
+    make tcp_syn_stop
+
+    # Rust policy engine (static musl binary)
+    cd "$srcdir/$pkgname/syn-intel"
+    cargo build --release --target "$_musl_target"
+
+    # Rust TUI (static musl binary)
+    cd "$srcdir/$pkgname/syn-sight"
+    cargo build --release --target "$_musl_target"
+}
+
+package() {
+    cd "$srcdir/$pkgname"
+
+    local _version _date
+    _version=$(cat VERSION)
+    _date=$(date -u -d "@$(git log -1 --format=%ct)" +%Y-%m-%d 2>/dev/null || date -u +%Y-%m-%d)
+
+    # Daemon binary + ASN update script
+    install -Dm755 tcp_syn_stop "$pkgdir/opt/tcp_syn_stop/tcp_syn_stop"
+    install -Dm755 tcp-syn-stop-asn-update "$pkgdir/opt/tcp_syn_stop/tcp-syn-stop-asn-update"
+    install -Dm755 tcp-syn-stop-tor-update "$pkgdir/opt/tcp_syn_stop/tcp-syn-stop-tor-update"
+
+    # Policy engine binary
+    install -Dm755 "syn-intel/target/$_musl_target/release/syn-intel" \
+        "$pkgdir/opt/tcp_syn_stop/syn-intel"
+
+    # TUI binary
+    install -Dm755 "syn-sight/target/$_musl_target/release/syn-sight" \
+        "$pkgdir/usr/bin/syn-sight"
+
+    # Config files
+    install -Dm644 whitelist.conf "$pkgdir/etc/tcp_syn_stop/whitelist.conf"
+    install -Dm644 blacklist.conf "$pkgdir/etc/tcp_syn_stop/blacklist.conf"
+    install -Dm644 tcp_syn_stop.conf "$pkgdir/etc/tcp_syn_stop/tcp_syn_stop.conf"
+    install -Dm644 tcp-syn-stop.default "$pkgdir/etc/default/tcp-syn-stop"
+    install -Dm644 syn-intel.default "$pkgdir/etc/default/syn-intel"
+
+    # Systemd units
+    install -Dm644 debian/tcp-syn-stop.tcp_syn_stop.service \
+        "$pkgdir/usr/lib/systemd/system/tcp_syn_stop.service"
+    install -Dm644 debian/tcp-syn-stop.syn-intel.service \
+        "$pkgdir/usr/lib/systemd/system/syn-intel.service"
+    install -Dm644 debian/tcp-syn-stop.tcp-syn-stop-asn-update.service \
+        "$pkgdir/usr/lib/systemd/system/tcp-syn-stop-asn-update.service"
+    install -Dm644 debian/tcp-syn-stop.tcp-syn-stop-asn-update.timer \
+        "$pkgdir/usr/lib/systemd/system/tcp-syn-stop-asn-update.timer"
+    install -Dm644 debian/tcp-syn-stop.tcp-syn-stop-tor-update.service \
+        "$pkgdir/usr/lib/systemd/system/tcp-syn-stop-tor-update.service"
+    install -Dm644 debian/tcp-syn-stop.tcp-syn-stop-tor-update.timer \
+        "$pkgdir/usr/lib/systemd/system/tcp-syn-stop-tor-update.timer"
+
+    # Logrotate
+    install -Dm644 debian/tcp-syn-stop.logrotate \
+        "$pkgdir/etc/logrotate.d/tcp-syn-stop"
+
+    # Man page (substitute placeholders)
+    sed "s/__VERSION__/$_version/g; s/__DATE__/$_date/g; s/__MAINTAINER__//g" \
+        tcp_syn_stop.8 > "$srcdir/tcp_syn_stop.8"
+    install -Dm644 "$srcdir/tcp_syn_stop.8" \
+        "$pkgdir/usr/share/man/man8/tcp_syn_stop.8"
+
+    # sysusers + tmpfiles (Arch convention for user/dir creation)
+    install -Dm644 "$srcdir/tcp-syn-stop.sysusers" \
+        "$pkgdir/usr/lib/sysusers.d/tcp-syn-stop.conf"
+    install -Dm644 "$srcdir/tcp-syn-stop.tmpfiles" \
+        "$pkgdir/usr/lib/tmpfiles.d/tcp-syn-stop.conf"
+
+    # License
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

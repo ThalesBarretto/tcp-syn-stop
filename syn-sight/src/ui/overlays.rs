@@ -117,7 +117,7 @@ pub fn render_asn_search(f: &mut Frame, search: &AsnSearchState) {
     f.render_stateful_widget(results_table, chunks[1], &mut table_state);
 
     // Footer
-    let footer = Paragraph::new(" [Space] Mark | [Enter] Add marked/selected | [Esc] Cancel | [Up/Down] Scroll ")
+    let footer = Paragraph::new(" [Tab] Mark | [A-b] Block | [A-w] Whitelist | [Esc] Cancel | [Up/Down] Scroll ")
         .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, chunks[2]);
 }
@@ -234,7 +234,7 @@ pub fn render_subnet_picker(f: &mut Frame, picker: &crate::app::SubnetPickerStat
 
     // Footer
     let footer = Paragraph::new(
-        " [Space] Mark | [Enter] Add marked/current | [a] Select all | [Esc] Cancel ",
+        " [Tab] Mark | [Enter] Add marked/current | [A-a] Select all | [Esc] Cancel ",
     )
     .style(Style::default().fg(Color::DarkGray));
     f.render_widget(footer, chunks[2]);
@@ -363,7 +363,10 @@ pub fn render_help_overlay(f: &mut Frame) {
             Span::styled("  ?         ", key), Span::styled("Toggle this help", desc),
         ]),
         Line::from(vec![
-            Span::styled("  /         ", key), Span::styled("ASN search", desc),
+            Span::styled("  /         ", key), Span::styled("Fuzzy find in current table", desc),
+        ]),
+        Line::from(vec![
+            Span::styled("  n         ", key), Span::styled("ASN database search", desc),
         ]),
         Line::from(vec![
             Span::styled("  b / w     ", key), Span::styled("Block / Whitelist selected", desc),

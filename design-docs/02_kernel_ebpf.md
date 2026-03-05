@@ -33,8 +33,8 @@ This program acts as the suite's "intelligence gatherer," identifying spoofed so
 
 | Map Name | Type | Purpose | Max Entries |
 | :--- | :--- | :--- | :--- |
-| `whitelist` | `LPM_TRIE` | CIDR blocks that are never blocked. | 1,024 |
-| `blacklist` | `LPM_TRIE` | Static blocks and dynamic ASN Auto-Bans. | 4,096 |
+| `whitelist` | `LPM_TRIE` | CIDR blocks that are never blocked. | 131,072 |
+| `blacklist` | `LPM_TRIE` | Static blocks and dynamic ASN Auto-Bans. | 131,072 |
 | `drop_ips` | `LRU_HASH` | Dynamic list of actively blocked spoofers. | 65,536 |
 | `blacklist_cnt`| `LRU_HASH` | Per-IP drop counters for blacklisted sources. | 65,536 |
 | `drop_cnt` | `PERCPU_ARRAY` | Lockless global packet drop counter. | 1 |

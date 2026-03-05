@@ -32,7 +32,7 @@ This directory contains the comprehensive technical design and architectural spe
 ### 5. [Observability & TUI (`syn-sight`)](05_observability_tui.md)
 - **Data Sources**: Direct BPF map reads (`drop_cnt`, `drop_ips`, `blacklist_cnt`, `port_drop_counts`) and SQLite queries.
 - **Rust Architecture**: `ratatui` rendering, 3-tab layout (Live, Forensics, Lists), in-memory `AsnTable`.
-- **Observability Features**: EMA-smoothed PPS sparklines, segmented health bar (BPF/RB/Fetch), iceberg visibility, fetch latency & freshness indicator, DogStatsD UDP export (`--statsd-addr`).
+- **Observability Features**: EMA-smoothed PPS sparklines, 7-segment health bar (BPF/RB/Map%/DB/Cfg/Sync/Fetch), iceberg visibility, fetch latency & freshness indicator, DogStatsD UDP export (12 metrics), fuzzy find (`/`) across all tables, ASN database search (`n`).
 - **Static Distribution**: Zero-dependency portability via MUSL static linking.
 
 ### 6. [Infrastructure & Lifecycle](06_infrastructure_lifecycle.md)

@@ -83,11 +83,11 @@ $(APP): $(USER_OBJ) $(UTILS_OBJ) $(LOGGING_OBJ) $(CONFIG_OBJ) $(BPF_LOADER_OBJ)
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
 
 $(TUI_APP):
-	cd $(TUI_DIR) && CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target x86_64-unknown-linux-musl
+	cd $(TUI_DIR) && C_INCLUDE_PATH=/usr/include CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target x86_64-unknown-linux-musl
 	cp $(TUI_DIR)/target/x86_64-unknown-linux-musl/release/$(TUI_APP) ./$(TUI_APP).bin
 
 $(INTEL_APP):
-	cd $(INTEL_DIR) && CC_x86_64_unknown_linux_musl=musl-gcc \
+	cd $(INTEL_DIR) && C_INCLUDE_PATH=/usr/include CC_x86_64_unknown_linux_musl=musl-gcc \
 	    cargo build --release --target x86_64-unknown-linux-musl
 	cp $(INTEL_DIR)/target/x86_64-unknown-linux-musl/release/$(INTEL_APP) ./$(INTEL_APP).bin
 

@@ -11,6 +11,7 @@ override_dh_auto_install:
 	# Daemon binary + ASN update script
 	install -D -m 0755 tcp_syn_stop debian/tcp-syn-stop/opt/tcp_syn_stop/tcp_syn_stop
 	install -D -m 0755 tcp-syn-stop-asn-update debian/tcp-syn-stop/opt/tcp_syn_stop/tcp-syn-stop-asn-update
+	install -D -m 0755 tcp-syn-stop-tor-update debian/tcp-syn-stop/opt/tcp_syn_stop/tcp-syn-stop-tor-update
 	# Policy engine binary
 	install -D -m 0755 syn-intel.bin debian/tcp-syn-stop/opt/tcp_syn_stop/syn-intel
 	# TUI binary
@@ -33,6 +34,7 @@ override_dh_installsystemd:
 	dh_installsystemd --name=tcp_syn_stop --no-start
 	dh_installsystemd --name=syn-intel --no-start
 	dh_installsystemd --name=tcp-syn-stop-asn-update --no-start
+	dh_installsystemd --name=tcp-syn-stop-tor-update --no-start
 
 override_dh_installchangelogs:
 	dh_installchangelogs debian/changelog

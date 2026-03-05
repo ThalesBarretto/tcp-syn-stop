@@ -1,0 +1,2 @@
+d /opt/tcp_syn_stop 2775 root tcp_syn_stop -
+d /var/log/tcp_syn_stop 0755 root root -

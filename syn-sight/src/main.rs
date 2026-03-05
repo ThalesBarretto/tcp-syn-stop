@@ -158,7 +158,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, tick_rate: Dur
 
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                if input::handle_event(app, key.code) {
+                if input::handle_event(app, key) {
                     return Ok(());
                 }
             }
@@ -189,6 +189,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, tick_rate: Dur
             match app.active_tab {
                 Tab::Live => {
                     app.update_asn_pps();
+                    app.run_fuzzy_find();
                 }
                 Tab::Forensics => {}
                 Tab::Lists => {
@@ -231,6 +232,26 @@ fn render(f: &mut ratatui::Frame, app: &App) {
     if let Some(ref search) = app.asn_search {
         ui::render_asn_search(f, search);
     }
+    if let Some(ref ff) = app.fuzzy_find {
+        use ratatui::{layout::Rect, style::{Color, Style}, widgets::{Clear, Paragraph}};
+        let bar_area = Rect {
+            x: size.x,
+            y: size.y + size.height.saturating_sub(1),
+            width: size.width,
+            height: 1,
+        };
+        f.render_widget(Clear, bar_area);
+        let count_str = if ff.query.is_empty() {
+            format!("{} total", ff.total)
+        } else {
+            format!("{} of {}", ff.matched_indices.len(), ff.total)
+        };
+        let text = format!(" / {}_ ({}) ", ff.query, count_str);
+        f.render_widget(
+            Paragraph::new(text).style(Style::default().fg(Color::Yellow)),
+            bar_area,
+        );
+    }
     if app.show_help {
         ui::render_help_overlay(f);
     }
@@ -240,7 +261,7 @@ fn render(f: &mut ratatui::Frame, app: &App) {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use protocol::{Attacker, Metrics};
+    use protocol::{Sender, Metrics};
 
     #[test]
     fn test_json_output_structure() {
@@ -253,7 +274,7 @@ mod tests {
                     active_blocks: 3,
                     blacklist_active: 0,
                 },
-                top_attackers: vec![],
+                top_senders: vec![],
                 top_ports: vec![],
                 ifaces: vec![],
                 instrumentation: Default::default(),
@@ -284,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn test_json_roundtrip_attackers() {
+    fn test_json_roundtrip_senders() {
         let output = JsonOutput {
             live: Some(SystemState {
                 uptime_secs: 100,
@@ -294,20 +315,20 @@ mod tests {
                     active_blocks: 0,
                     blacklist_active: 0,
                 },
-                top_attackers: vec![
-                    Attacker {
+                top_senders: vec![
+                    Sender {
                         ip: "10.0.0.1".into(),
                         asn: "AS1".into(),
                         count: 100,
                         peak_pps: 50,
                     },
-                    Attacker {
+                    Sender {
                         ip: "10.0.0.2".into(),
                         asn: "AS2".into(),
                         count: 200,
                         peak_pps: 100,
                     },
-                    Attacker {
+                    Sender {
                         ip: "10.0.0.3".into(),
                         asn: "AS3".into(),
                         count: 300,
@@ -325,9 +346,9 @@ mod tests {
         let json = serde_json::to_string(&output).unwrap();
         let roundtrip: JsonOutput = serde_json::from_str(&json).unwrap();
         let live = roundtrip.live.unwrap();
-        assert_eq!(live.top_attackers.len(), 3);
-        assert_eq!(live.top_attackers[0].ip, "10.0.0.1");
-        assert_eq!(live.top_attackers[1].count, 200);
-        assert_eq!(live.top_attackers[2].peak_pps, 150);
+        assert_eq!(live.top_senders.len(), 3);
+        assert_eq!(live.top_senders[0].ip, "10.0.0.1");
+        assert_eq!(live.top_senders[1].count, 200);
+        assert_eq!(live.top_senders[2].peak_pps, 150);
     }
 }

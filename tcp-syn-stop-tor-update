@@ -1,0 +1,47 @@
+#!/bin/sh
+# tcp-syn-stop-tor-update — fetch Tor exit nodes and merge into blacklist
+set -eu
+
+BLACKLIST="/etc/tcp_syn_stop/blacklist.conf"
+TOR_URL="https://check.torproject.org/exit-addresses"
+
+log() { logger -t tcp-syn-stop-tor-update "$@"; echo "$@"; }
+
+tmp=$(mktemp /tmp/tor-exits.XXXXXX)
+trap 'rm -f "$tmp"' EXIT
+
+log "Downloading Tor exit list..."
+if ! curl -fsSL --retry 3 --retry-delay 10 "$TOR_URL" > "$tmp"; then
+    log "ERROR: Tor exit list download failed"
+    exit 1
+fi
+
+# Extract unique IPs, convert to /32 CIDRs
+tor_ips=$(grep '^ExitAddress ' "$tmp" | awk '{print $2}' | sort -u)
+count=$(echo "$tor_ips" | wc -l)
+
+if [ "$count" -lt 100 ]; then
+    log "ERROR: only ${count} Tor exits found (expected >1000); aborting"
+    exit 1
+fi
+log "Found ${count} Tor exit nodes."
+
+# Remove old Tor entries from blacklist, append fresh ones
+if [ -f "$BLACKLIST" ]; then
+    grep -v '# tor$' "$BLACKLIST" > "${BLACKLIST}.tmp" || true
+else
+    : > "${BLACKLIST}.tmp"
+fi
+
+for ip in $tor_ips; do
+    echo "${ip}/32 # tor" >> "${BLACKLIST}.tmp"
+done
+
+mv -f "${BLACKLIST}.tmp" "$BLACKLIST"
+log "Updated blacklist with ${count} Tor exit nodes."
+
+# Reload daemon
+if systemctl is-active --quiet tcp-syn-stop.tcp_syn_stop.service; then
+    systemctl kill --signal=SIGHUP tcp-syn-stop.tcp_syn_stop.service
+    log "Sent SIGHUP to daemon."
+fi

@@ -1,5 +1,3 @@
-<img width="1408" height="768" alt="kapybara_vps" src="https://github.com/user-attachments/assets/28e84723-0a5a-4273-b5f8-54990355eab3" />
-
 # eBPF TCP SYN Flood Protection Suite
 
 > A high-performance, enterprise-grade defense suite leveraging **libbpf**, **CO-RE**, and **Rust**.
@@ -27,7 +25,7 @@ Operates at the lowest level of the network stack (the NIC driver), dropping mal
 If multiple flooding IPs belong to the same ASN prefix, `syn-intel` automatically blacklists the **entire prefix** using a tight CIDR alignment algorithm. Bans escalate with exponential backoff and decay after a quiet window.
 
 ### Tier 3: nftables Secondary Shield
-Provides rate-limiting for non-spoofed attackers and UDP flood protection for sensitive ports (like VPN 443).
+Provides rate-limiting for non-spoofed senders and UDP flood protection for sensitive ports (like VPN 443).
 
 ---
 
@@ -40,20 +38,19 @@ A persistent **HUD** (health bar + Total PPS sparkline + separator) spans the to
 
 #### Live Tab
 -   **Attack Pulse**: Per-ASN PPS sparklines with **velocity coloring** — Red (rising), Yellow (steady), Green (falling). No color legend needed; color encodes threat trend.
--   **Active Swarm**: Real-time table of top attacking IPs and ASNs. Shows iceberg indicator when truncated (e.g., "1000 of 45231 IPs").
+-   **Active Swarm**: Real-time table of top source IPs and ASNs. Shows iceberg indicator when truncated (e.g., "1000 of 45231 IPs").
 -   **Target Heatmap**: Top 10 targeted ports with exact drop counts from BPF `port_drop_counts` map.
 -   **Surgical Preview**: Footer shows what `b` would do for the selected IP (`[b] block 203.0.113.42/32 (AS13335)`).
 -   **Instrumentation**: Fetch latency, ASN cache hit rate, render latency, and data freshness.
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/814d49ee-0dcd-4f75-b85f-aba586de0a22" />
 
-<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/6e42edb9-c182-4d04-911f-901c3bf7ef4b" />
 
 #### Forensics Tab
 -   **Bad Neighborhoods**: Subnet clusters ranked by attack impact, with ASN name and country. Sort by Impact, Country, or Name with `s`.
 -   **Drilldown**: Press `Enter` on a neighborhood to see per-IP detail within that subnet, including port diversity.
 -   **ROI Analysis**: Toggle between chart and table views (`v`) showing packets mitigated and CPU seconds saved over time.
 -   **Reason Breakdown**: Visual bars showing BLACKLIST vs DYNAMIC drop proportions.
-
-<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/e30bb662-c277-41ca-93fa-15d9057145d7" />
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/45b9d6cc-46ac-406f-96ce-4d86f1fff497" />
 
 
 #### Lists Tab
@@ -79,7 +76,8 @@ A persistent **HUD** (health bar + Total PPS sparkline + separator) spans the to
 | `t` | Forensics | Cycle bot classification threshold |
 | `Enter` | Forensics neighborhoods | Open per-IP drilldown |
 | `Esc` | Any modal | Close overlay |
-| `/` | Global | Open ASN search |
+| `/` | Live / Lists | Fuzzy find in current table |
+| `n` | Global | Open ASN database search |
 | `a` | Lists | Add entry to focused list |
 | `d` / `Delete` | Lists | Delete selected entry |
 | `s` | Lists | Save list entries in sorted order |
@@ -213,7 +211,7 @@ This system is designed for high-performance production environments. Its failur
 - **Sampling**: A per-CPU token bucket rate-limits drop events to at most one per CPU per millisecond, giving deterministic bounded overhead under flood while capturing every drop at low PPS.
 
 ### 2. Map Saturation
-- **Dynamic Blocks (`drop_ips`)**: Uses an **LRU Hash** (65,536 entries). When full, the oldest attacker is evicted to make room for the newest. The system degrades gracefully by "forgetting" old attackers.
+- **Dynamic Blocks (`drop_ips`)**: Uses an **LRU Hash** (65,536 entries). When full, the oldest entry is evicted to make room for the newest. The system degrades gracefully by "forgetting" old senders.
 - **Auto-Bans (`blacklist`)**: Uses an **LPM Trie** (4,096 entries). If full, new subnet blocks return `-ENOSPC`. Existing blocks are unaffected.
 
 ### 3. Clock & Consistency
@@ -240,9 +238,9 @@ Packets dropped at XDP never reach the kernel networking stack. No `sk_buff` all
 
 ### Why the tracepoint approach matters
 
-**The reflection attack.** An attacker sends millions of SYNs to our server with forged source IPs — the victim's addresses. Our kernel, seeing valid SYNs, dutifully replies with SYN-ACKs to each spoofed source. The victim — who never sent any SYN — receives a flood of unsolicited SYN-ACKs from *our* server. Our server has become an unwitting reflector, amplifying the attack. Meanwhile, our SYN queue and conntrack table fill up with half-open connections that will never complete, degrading our own service.
+**The reflection attack.** A remote host sends millions of SYNs to our server with forged source IPs — the victim's addresses. Our kernel, seeing valid SYNs, dutifully replies with SYN-ACKs to each spoofed source. The victim — who never sent any SYN — receives a flood of unsolicited SYN-ACKs from *our* server. Our server has become an unwitting reflector, amplifying the attack. Meanwhile, our SYN queue and conntrack table fill up with half-open connections that will never complete, degrading our own service.
 
-**Detection via the kernel's TCP state machine.** nftables-only detection is inherently blunt. Rate-limiting `ct state new` is a global threshold that punishes legitimate clients and attackers equally. `nft meters` can do per-IP rate limiting, but the meter table itself becomes an exhaustion vector under spoofed-source floods.
+**Detection via the kernel's TCP state machine.** nftables-only detection is inherently blunt. Rate-limiting `ct state new` is a global threshold that punishes legitimate clients and offending senders equally. `nft meters` can do per-IP rate limiting, but the meter table itself becomes an exhaustion vector under spoofed-source floods.
 
 The `tcp/tcp_retransmit_synack` tracepoint exploits the kernel's own retransmission logic as a spoofed-source oracle. When our kernel sends a SYN-ACK and the remote end never ACKs, the kernel retransmits the SYN-ACK after a full RTO timeout. That retransmission fires the tracepoint — and the destination IP in that retransmit is the spoofed victim's address. A legitimate slow client completes the handshake before the retransmit timer fires. A spoofed source never will. The false-positive rate is essentially zero by construction, which no rate-limiting rule can match.
 
