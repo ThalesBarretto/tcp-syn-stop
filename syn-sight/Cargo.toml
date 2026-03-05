@@ -1,6 +1,6 @@
 [package]
 name = "syn-sight"
-version = "12.1.1"
+version = "12.2.1"
 edition = "2021"
 rust-version = "1.74"
 authors = []
