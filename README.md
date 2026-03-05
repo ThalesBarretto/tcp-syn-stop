@@ -1,12 +1,11 @@
+<img width="1408" height="768" alt="kapybara_vps" src="https://github.com/user-attachments/assets/28e84723-0a5a-4273-b5f8-54990355eab3" />
+
 # eBPF TCP SYN Flood Protection Suite
 
 > A high-performance, enterprise-grade defense suite leveraging **libbpf**, **CO-RE**, and **Rust**.
 > Current version is tracked in the [`VERSION`](VERSION) file.
 
 This project provides a robust, 3-tier defense architecture designed to protect Linux servers from volumetric floods (TCP SYN, UDP garbage, Reflection Attacks) before they impact the system's CPU and networking stack.
-
-<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/6e42edb9-c182-4d04-911f-901c3bf7ef4b" />
-
 
 ## Components
 
@@ -46,11 +45,16 @@ A persistent **HUD** (health bar + Total PPS sparkline + separator) spans the to
 -   **Surgical Preview**: Footer shows what `b` would do for the selected IP (`[b] block 203.0.113.42/32 (AS13335)`).
 -   **Instrumentation**: Fetch latency, ASN cache hit rate, render latency, and data freshness.
 
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/6e42edb9-c182-4d04-911f-901c3bf7ef4b" />
+
 #### Forensics Tab
 -   **Bad Neighborhoods**: Subnet clusters ranked by attack impact, with ASN name and country. Sort by Impact, Country, or Name with `s`.
 -   **Drilldown**: Press `Enter` on a neighborhood to see per-IP detail within that subnet, including port diversity.
 -   **ROI Analysis**: Toggle between chart and table views (`v`) showing packets mitigated and CPU seconds saved over time.
 -   **Reason Breakdown**: Visual bars showing BLACKLIST vs DYNAMIC drop proportions.
+
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/e30bb662-c277-41ca-93fa-15d9057145d7" />
+
 
 #### Lists Tab
 -   **Whitelist/Blacklist Editor**: Side-by-side view of both config files with ASN and country columns. Switch focus with `Left`/`Right`.
