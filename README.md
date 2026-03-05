@@ -20,8 +20,8 @@ The suite consists of three components:
 
 ### Tier 1: Kernel-Level eBPF (XDP & Tracepoint)
 Operates at the lowest level of the network stack (the NIC driver), dropping malicious traffic at wire-speed.
--   **Tracepoint (`tcp/tcp_retransmit_synack`)**: Detects spoofed reflection attacks by monitoring SYN-ACK retransmissions.
--   **XDP Filter**: Drops packets from blacklisted or dynamically flagged IPs. Every drop is atomically counted in the kernel for 100% accurate metrics.
+-   **Tracepoint (`tcp/tcp_retransmit_synack`)**: Detects spoofed-source SYN floods by catching SYN-ACK retransmissions — when our kernel retransmits a SYN-ACK to a destination that never completes the handshake, that destination is a forged source address. The IP is added to the dynamic block map.
+-   **XDP Filter**: Drops subsequent SYNs from dynamically flagged IPs and all traffic from manually blacklisted CIDRs at wire speed, before `sk_buff` allocation or conntrack. Every drop is atomically counted in the kernel for 100% accurate metrics.
 
 ### Tier 2: ASN Auto-Ban (Neighborhood Watch)
 If multiple flooding IPs belong to the same ASN prefix, `syn-intel` automatically blacklists the **entire prefix** using a tight CIDR alignment algorithm. Bans escalate with exponential backoff and decay after a quiet window.
@@ -232,7 +232,7 @@ A natural question: Linux already has nftables and nf_conntrack for stateful pac
 
 SYN floods are specifically devastating to nf_conntrack because every SYN creates a conntrack entry in `SYN_RECV` state. The default `nf_conntrack_max` is typically 65,536–262,144, and each entry costs ~300 bytes of kernel memory. A SYN flood at even 100K PPS fills the table in seconds. When the table is full, the kernel drops **all** new connections — legitimate ones included. That conntrack table collapse is the actual denial-of-service, not bandwidth saturation.
 
-Tuning `nf_conntrack_max` higher trades memory for headroom but degrades hash table performance. Lowering `nf_conntrack_tcp_timeout_syn_recv` risks dropping slow legitimate clients. `tcp_syncookies` helps but degrades TCP option negotiation (window scaling, SACK, timestamps) and still burns CPU on cryptographic cookie generation for every SYN — not free at 10M PPS.
+Tuning `nf_conntrack_max` higher trades memory for headroom but degrades hash table performance. Lowering `nf_conntrack_tcp_timeout_syn_recv` risks dropping slow legitimate clients. `tcp_syncookies` avoids SYN queue exhaustion but still burns CPU on cookie generation (SipHash per SYN) and every SYN still traverses the full network stack — `sk_buff` allocation, netfilter traversal, conntrack lookup — before the cookie is even computed. At 10M PPS this per-packet overhead is the bottleneck, not the queue. Note: since Linux 2.6.26, syncookies encode window scaling, SACK, and ECN in the TCP timestamp field, so TCP option degradation is no longer a concern for modern peers.
 
 ### What XDP buys
 
@@ -240,9 +240,13 @@ Packets dropped at XDP never reach the kernel networking stack. No `sk_buff` all
 
 ### Why the tracepoint approach matters
 
-nftables-only detection is inherently blunt. Rate-limiting `ct state new` is a global threshold that punishes legitimate clients and attackers equally. `nft meters` can do per-IP rate limiting, but the meter table itself becomes an exhaustion vector under spoofed-source floods.
+**The reflection attack.** An attacker sends millions of SYNs to our server with forged source IPs — the victim's addresses. Our kernel, seeing valid SYNs, dutifully replies with SYN-ACKs to each spoofed source. The victim — who never sent any SYN — receives a flood of unsolicited SYN-ACKs from *our* server. Our server has become an unwitting reflector, amplifying the attack. Meanwhile, our SYN queue and conntrack table fill up with half-open connections that will never complete, degrading our own service.
 
-The `tcp/tcp_retransmit_synack` tracepoint exploits the kernel's own TCP state machine as an oracle. It fires only after the full RTO expires — meaning the SYN-ACK was sent but never acknowledged. A legitimate slow client completes the handshake before the retransmit timer fires. A spoofed source never will. The false-positive rate is essentially zero by construction, which no rate-limiting rule can match.
+**Detection via the kernel's TCP state machine.** nftables-only detection is inherently blunt. Rate-limiting `ct state new` is a global threshold that punishes legitimate clients and attackers equally. `nft meters` can do per-IP rate limiting, but the meter table itself becomes an exhaustion vector under spoofed-source floods.
+
+The `tcp/tcp_retransmit_synack` tracepoint exploits the kernel's own retransmission logic as a spoofed-source oracle. When our kernel sends a SYN-ACK and the remote end never ACKs, the kernel retransmits the SYN-ACK after a full RTO timeout. That retransmission fires the tracepoint — and the destination IP in that retransmit is the spoofed victim's address. A legitimate slow client completes the handshake before the retransmit timer fires. A spoofed source never will. The false-positive rate is essentially zero by construction, which no rate-limiting rule can match.
+
+Once detected, the victim's IP is inserted into the `drop_ips` BPF map, and the XDP filter silently drops all subsequent SYNs bearing that forged source — stopping both our own resource exhaustion and the reflected SYN-ACK flood hitting the victim.
 
 ### What this program cannot replace
 
