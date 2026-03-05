@@ -177,6 +177,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, tick_rate: Dur
                 }
             }
             let _ = app.fetch_data();
+            app.poll_list_changes();
             app.verify_pending_syncs();
             app.tick_sync_status();
             app.emit_statsd();

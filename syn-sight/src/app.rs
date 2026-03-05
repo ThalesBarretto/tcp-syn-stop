@@ -207,6 +207,129 @@ pub(crate) enum SyncStatus {
     Confirmed(u8),
 }
 
+/// Inotify watcher for whitelist/blacklist config files.
+///
+/// Watches the parent directories of both config files for `IN_MOVED_TO`,
+/// `IN_MODIFY`, and `IN_CREATE` events.  Atomic renames (used by
+/// `remove_from_file` and `rewrite_sorted`) fire `IN_MOVED_TO` on the
+/// directory; `append_to_file` fires `IN_MODIFY` on the file itself.
+///
+/// The inotify fd is set non-blocking so `poll_changed()` can be called
+/// every tick without stalling the event loop.
+pub(crate) struct ListFileWatcher {
+    fd: i32,
+    whitelist_name: String,
+    blacklist_name: String,
+}
+
+impl ListFileWatcher {
+    /// Set up inotify watches on the parent directories of both config paths.
+    /// Returns `None` if inotify cannot be initialised (non-fatal).
+    pub fn new(whitelist_path: &str, blacklist_path: &str) -> Option<Self> {
+        use std::path::Path;
+
+        // SAFETY: inotify_init1 is a standard Linux syscall.
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+
+        let wl_dir = Path::new(whitelist_path).parent().unwrap_or(Path::new("/"));
+        let bl_dir = Path::new(blacklist_path).parent().unwrap_or(Path::new("/"));
+
+        let mask = libc::IN_MOVED_TO | libc::IN_MODIFY | libc::IN_CREATE;
+
+        // Watch whitelist directory.
+        let wl_dir_c = std::ffi::CString::new(wl_dir.to_str().unwrap_or("/")).ok()?;
+        // SAFETY: valid fd, valid path, standard flags.
+        let ret = unsafe { libc::inotify_add_watch(fd, wl_dir_c.as_ptr(), mask) };
+        if ret < 0 {
+            unsafe { libc::close(fd) };
+            return None;
+        }
+
+        // Watch blacklist directory (skip if same as whitelist dir).
+        if bl_dir != wl_dir {
+            let bl_dir_c = std::ffi::CString::new(bl_dir.to_str().unwrap_or("/")).ok()?;
+            let ret = unsafe { libc::inotify_add_watch(fd, bl_dir_c.as_ptr(), mask) };
+            if ret < 0 {
+                // Non-fatal: whitelist dir is still watched.
+            }
+        }
+
+        let whitelist_name = Path::new(whitelist_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let blacklist_name = Path::new(blacklist_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        Some(Self {
+            fd,
+            whitelist_name,
+            blacklist_name,
+        })
+    }
+
+    /// Non-blocking check: returns `true` if any watched config file was
+    /// modified since the last call.  Drains all pending inotify events.
+    pub fn poll_changed(&self) -> bool {
+        // inotify_event is 16 bytes + variable name; 512 bytes handles many events.
+        let mut buf = [0u8; 512];
+        let mut changed = false;
+
+        loop {
+            // SAFETY: valid fd, valid buffer, standard read.
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+            if n <= 0 {
+                break;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let n = n as usize;
+
+            let mut offset = 0;
+            while offset + std::mem::size_of::<libc::inotify_event>() <= n {
+                // SAFETY: inotify guarantees aligned inotify_event structs in the buffer.
+                let event = unsafe {
+                    &*(buf.as_ptr().add(offset).cast::<libc::inotify_event>())
+                };
+                #[allow(clippy::cast_sign_loss)]
+                let name_len = event.len as usize;
+                let total = std::mem::size_of::<libc::inotify_event>() + name_len;
+
+                if name_len > 0 {
+                    let name_start = offset + std::mem::size_of::<libc::inotify_event>();
+                    let name_end = (name_start + name_len).min(n);
+                    let name_bytes = &buf[name_start..name_end];
+                    let name = std::ffi::CStr::from_bytes_until_nul(name_bytes)
+                        .map(|c| c.to_string_lossy())
+                        .unwrap_or_default();
+                    if name == self.whitelist_name.as_str()
+                        || name == self.blacklist_name.as_str()
+                    {
+                        changed = true;
+                    }
+                }
+
+                offset += total;
+            }
+        }
+
+        changed
+    }
+}
+
+impl Drop for ListFileWatcher {
+    fn drop(&mut self) {
+        // SAFETY: valid fd from inotify_init1.
+        unsafe { libc::close(self.fd) };
+    }
+}
+
 pub const ASN_PALETTE: [Color; 8] = [
     Color::Red,
     Color::Yellow,
@@ -319,6 +442,8 @@ pub struct App {
     // BPF sync verification
     pub(crate) pending_syncs: Vec<PendingSync>,
     pub(crate) sync_status: SyncStatus,
+    // Inotify watcher for external config file changes
+    pub(crate) list_watcher: Option<ListFileWatcher>,
 }
 
 pub fn should_refresh_forensics(last: Option<Instant>, now: Instant) -> bool {
@@ -330,6 +455,7 @@ pub fn should_refresh_forensics(last: Option<Instant>, now: Instant) -> bool {
 
 impl App {
     pub fn new(bpf_maps: Option<BpfMaps>, db_path: String, whitelist_path: String, blacklist_path: String) -> App {
+        let list_watcher = ListFileWatcher::new(&whitelist_path, &blacklist_path);
         App {
             bpf_maps,
             db_path,
@@ -408,6 +534,7 @@ impl App {
             config_errors: Vec::new(),
             pending_syncs: Vec::new(),
             sync_status: SyncStatus::Idle,
+            list_watcher,
         }
     }
 
@@ -1393,6 +1520,14 @@ impl App {
             }
         } else {
             self.sync_status = SyncStatus::Pending(self.pending_syncs.len());
+        }
+    }
+
+    /// Check inotify for external config file changes and reload if needed.
+    pub fn poll_list_changes(&mut self) {
+        let changed = self.list_watcher.as_ref().is_some_and(ListFileWatcher::poll_changed);
+        if changed {
+            self.load_lists();
         }
     }
 
