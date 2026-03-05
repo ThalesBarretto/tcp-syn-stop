@@ -44,16 +44,16 @@ A persistent **HUD** (health bar + Total PPS sparkline + separator) spans the to
 -   **Target Heatmap**: Top 10 targeted ports with exact drop counts from BPF `port_drop_counts` map.
 -   **Surgical Preview**: Footer shows what `b` would do for the selected IP (`[b] block 203.0.113.42/32 (AS13335)`).
 -   **Instrumentation**: Fetch latency, ASN cache hit rate, render latency, and data freshness.
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/814d49ee-0dcd-4f75-b85f-aba586de0a22" />
 
-<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/6e42edb9-c182-4d04-911f-901c3bf7ef4b" />
 
 #### Forensics Tab
 -   **Bad Neighborhoods**: Subnet clusters ranked by attack impact, with ASN name and country. Sort by Impact, Country, or Name with `s`.
 -   **Drilldown**: Press `Enter` on a neighborhood to see per-IP detail within that subnet, including port diversity.
 -   **ROI Analysis**: Toggle between chart and table views (`v`) showing packets mitigated and CPU seconds saved over time.
 -   **Reason Breakdown**: Visual bars showing BLACKLIST vs DYNAMIC drop proportions.
+<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/45b9d6cc-46ac-406f-96ce-4d86f1fff497" />
 
-<img width="1920" height="1200" alt="image" src="https://github.com/user-attachments/assets/e30bb662-c277-41ca-93fa-15d9057145d7" />
 
 
 #### Lists Tab
