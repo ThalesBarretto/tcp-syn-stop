@@ -173,7 +173,7 @@ fn render_roi_table(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 fn render_neighborhoods_table(f: &mut Frame, app: &App, area: ratatui::layout::Rect, compact: bool) {
     let hood_count = app.neighborhoods.len();
     let neighborhood_rows: Vec<Row> = if app.neighborhoods.is_empty() {
-        let empty_cells = if compact { 4 } else { 6 };
+        let empty_cells = if compact { 5 } else { 7 };
         let cells: Vec<&str> = std::iter::once("No data").chain(std::iter::repeat("").take(empty_cells - 1)).collect();
         vec![Row::new(cells).style(Style::default().fg(Color::DarkGray))]
     } else {
@@ -193,6 +193,11 @@ fn render_neighborhoods_table(f: &mut Frame, app: &App, area: ratatui::layout::R
                     Row::new(vec![
                         Cell::from(hood.subnet_cidr.as_str()),
                         Cell::from(hood.country.as_str()).style(Style::default().fg(country_color(&hood.country))),
+                        if hood.rir_country.is_empty() {
+                            Cell::from("--").style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM))
+                        } else {
+                            Cell::from(hood.rir_country.as_str()).style(Style::default().fg(country_color(&hood.rir_country)))
+                        },
                         Cell::from(hood.bot_count.to_string()),
                         Cell::from(hood.total_impact.to_string()),
                     ])
@@ -202,6 +207,11 @@ fn render_neighborhoods_table(f: &mut Frame, app: &App, area: ratatui::layout::R
                     Row::new(vec![
                         Cell::from(hood.subnet_cidr.as_str()),
                         Cell::from(hood.country.as_str()).style(Style::default().fg(country_color(&hood.country))),
+                        if hood.rir_country.is_empty() {
+                            Cell::from("--").style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM))
+                        } else {
+                            Cell::from(hood.rir_country.as_str()).style(Style::default().fg(country_color(&hood.rir_country)))
+                        },
                         Cell::from(hood.asn.as_str()),
                         Cell::from(name_trunc),
                         Cell::from(hood.bot_count.to_string()),
@@ -237,12 +247,13 @@ fn render_neighborhoods_table(f: &mut Frame, app: &App, area: ratatui::layout::R
             [
                 Constraint::Min(10),
                 Constraint::Length(4),
+                Constraint::Length(4),
                 Constraint::Length(5),
                 Constraint::Length(8),
             ],
         )
         .header(
-            Row::new(vec!["Subnet", "CC", "Bots", "Impact"])
+            Row::new(vec!["Subnet", "CC", "Reg", "Bots", "Impact"])
                 .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
                 .bottom_margin(1),
         )
@@ -252,6 +263,7 @@ fn render_neighborhoods_table(f: &mut Frame, app: &App, area: ratatui::layout::R
             [
                 Constraint::Min(14),
                 Constraint::Length(4),
+                Constraint::Length(4),
                 Constraint::Length(10),
                 Constraint::Length(20),
                 Constraint::Length(5),
@@ -259,7 +271,7 @@ fn render_neighborhoods_table(f: &mut Frame, app: &App, area: ratatui::layout::R
             ],
         )
         .header(
-            Row::new(vec!["Subnet", "CC", "ASN", "Name", "Bots", "Impact"])
+            Row::new(vec!["Subnet", "CC", "Reg", "ASN", "Name", "Bots", "Impact"])
                 .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
                 .bottom_margin(1),
         )

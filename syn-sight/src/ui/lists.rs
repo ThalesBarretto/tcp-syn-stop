@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+use super::country_color;
 use crate::app::{App, InputMode, ListsFocus};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -93,7 +94,7 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
 
     // Whitelist table
     let wl_rows: Vec<Row> = if app.whitelist_entries.is_empty() {
-        vec![Row::new(vec!["(empty)", "", "", ""]).style(Style::default().fg(Color::DarkGray))]
+        vec![Row::new(vec!["(empty)", "", "", "", ""]).style(Style::default().fg(Color::DarkGray))]
     } else {
         app.whitelist_entries
             .iter()
@@ -101,6 +102,11 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
                 Row::new(vec![
                     Cell::from(entry.cidr.as_str()),
                     Cell::from(entry.country.as_str()),
+                    if entry.rir_country.is_empty() {
+                        Cell::from("--").style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM))
+                    } else {
+                        Cell::from(entry.rir_country.as_str()).style(Style::default().fg(country_color(&entry.rir_country)))
+                    },
                     Cell::from(entry.asn.as_str()),
                     Cell::from(entry.as_name.as_str()).style(Style::default().fg(Color::DarkGray)),
                 ])
@@ -115,10 +121,10 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
     };
     let wl_table = Table::new(
         wl_rows,
-        [Constraint::Min(14), Constraint::Length(4), Constraint::Length(10), Constraint::Min(8)],
+        [Constraint::Min(14), Constraint::Length(4), Constraint::Length(4), Constraint::Length(10), Constraint::Min(8)],
     )
     .header(
-        Row::new(vec!["CIDR", "CC", "ASN", "Name"])
+        Row::new(vec!["CIDR", "CC", "Reg", "ASN", "Name"])
             .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )
@@ -142,7 +148,7 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
 
     // Blacklist table
     let bl_rows: Vec<Row> = if app.blacklist_entries.is_empty() {
-        vec![Row::new(vec!["(empty)", "", "", "", ""]).style(Style::default().fg(Color::DarkGray))]
+        vec![Row::new(vec!["(empty)", "", "", "", "", ""]).style(Style::default().fg(Color::DarkGray))]
     } else {
         app.blacklist_entries
             .iter()
@@ -150,6 +156,11 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
                 Row::new(vec![
                     Cell::from(entry.cidr.as_str()),
                     Cell::from(entry.country.as_str()),
+                    if entry.rir_country.is_empty() {
+                        Cell::from("--").style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM))
+                    } else {
+                        Cell::from(entry.rir_country.as_str()).style(Style::default().fg(country_color(&entry.rir_country)))
+                    },
                     Cell::from(entry.asn.as_str()),
                     Cell::from(entry.as_name.as_str()).style(Style::default().fg(Color::DarkGray)),
                     Cell::from(entry.drop_count.to_string()),
@@ -168,13 +179,14 @@ pub fn render_lists(f: &mut Frame, app: &App, area: Rect) {
         [
             Constraint::Min(14),
             Constraint::Length(4),
+            Constraint::Length(4),
             Constraint::Length(10),
             Constraint::Min(8),
             Constraint::Length(10),
         ],
     )
     .header(
-        Row::new(vec!["CIDR", "CC", "ASN", "Name", "Drops"])
+        Row::new(vec!["CIDR", "CC", "Reg", "ASN", "Name", "Drops"])
             .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )

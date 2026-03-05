@@ -288,6 +288,11 @@ fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
             Row::new(vec![
                 Cell::from(e.ip.as_str()),
                 Cell::from(e.country.as_str()).style(Style::default().fg(country_color(&e.country))),
+                if e.rir_country.is_empty() {
+                    Cell::from("--").style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM))
+                } else {
+                    Cell::from(e.rir_country.as_str()).style(Style::default().fg(country_color(&e.rir_country)))
+                },
                 Cell::from(e.asn.as_str()),
                 Cell::from(e.as_name.as_str()).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(e.total_drops.to_string()),
@@ -308,6 +313,7 @@ fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
         [
             Constraint::Length(15),
             Constraint::Length(4),
+            Constraint::Length(4),
             Constraint::Length(10),
             Constraint::Min(8),
             Constraint::Length(12),
@@ -316,7 +322,7 @@ fn render_swarm_per_ip(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["IP Address", "CC", "ASN", "Name", "Packets", "Last Seen", "Reason"])
+        Row::new(vec!["IP Address", "CC", "Reg", "ASN", "Name", "Packets", "Last Seen", "Reason"])
             .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )
@@ -374,6 +380,11 @@ fn render_swarm_aggregate(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(e.asn.as_str()),
                 Cell::from(e.as_name.as_str()).style(Style::default().fg(Color::DarkGray)),
                 Cell::from(e.country.as_str()).style(Style::default().fg(country_color(&e.country))),
+                if e.rir_country.is_empty() {
+                    Cell::from("--").style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM))
+                } else {
+                    Cell::from(e.rir_country.as_str()).style(Style::default().fg(country_color(&e.rir_country)))
+                },
                 Cell::from(e.ip_count.to_string()),
                 Cell::from(e.total_drops.to_string()),
                 Cell::from(time_fmt::format_ktime_ago(e.last_seen_ns, now_ns)),
@@ -394,6 +405,7 @@ fn render_swarm_aggregate(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(10),
             Constraint::Min(8),
             Constraint::Length(4),
+            Constraint::Length(4),
             Constraint::Length(6),
             Constraint::Length(12),
             Constraint::Length(9),
@@ -401,7 +413,7 @@ fn render_swarm_aggregate(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["ASN", "Name", "CC", "IPs", "Packets", "Last Seen", "Reason"])
+        Row::new(vec!["ASN", "Name", "CC", "Reg", "IPs", "Packets", "Last Seen", "Reason"])
             .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )

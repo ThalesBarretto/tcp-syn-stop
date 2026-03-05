@@ -9,6 +9,7 @@
 use crate::asn_table::{self, AsnTable, AsnTableData};
 use crate::bpf;
 use crate::bpf::BpfMaps;
+use crate::rir_table::{RirTable, RirTableData};
 use crate::ui::theme::Theme;
 use crate::forensics;
 use crate::forensics::SwarmEntry;
@@ -48,6 +49,7 @@ pub struct SwarmAsnEntry {
     pub asn: String,
     pub as_name: String,
     pub country: String,
+    pub rir_country: String,
     pub ip_count: usize,
     pub total_drops: u64,
     pub last_seen_ns: u64,
@@ -74,6 +76,7 @@ pub struct ListEntry {
     pub asn: String,
     pub as_name: String,
     pub country: String,
+    pub rir_country: String,
 }
 
 pub struct BlacklistEntry {
@@ -82,6 +85,7 @@ pub struct BlacklistEntry {
     pub asn: String,
     pub as_name: String,
     pub country: String,
+    pub rir_country: String,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -374,6 +378,9 @@ pub struct App {
     // In-memory ASN lookup table (loaded once from SQLite)
     pub(crate) asn_table: Option<AsnTable>,
     pub(crate) asn_load_rx: Option<mpsc::Receiver<AsnTableData>>,
+    // In-memory RIR delegation table (loaded once from SQLite)
+    pub(crate) rir_table: Option<RirTable>,
+    pub(crate) rir_load_rx: Option<mpsc::Receiver<RirTableData>>,
     // Per-ASN PPS tracking + BPF PPS delta
     pub(crate) asn_countries: HashMap<String, String>,
     pub(crate) asn_names: HashMap<String, String>,
@@ -474,6 +481,8 @@ impl App {
             swarm_agg_scroll: 0,
             asn_table: None,
             asn_load_rx: None,
+            rir_table: None,
+            rir_load_rx: None,
             reason_breakdown: Vec::new(),
             blacklist_drop_counts: HashMap::new(),
             neighborhoods: Vec::new(),
@@ -673,7 +682,7 @@ impl App {
         let now_ns = time_fmt::clock_boottime_ns();
         let (swarm, filtered_total, agg) = build_swarm_entries(
             &drop_ips, &blacklist_ips, now_ns,
-            self.asn_table.as_ref(), 1000, self.hide_blacklisted,
+            self.asn_table.as_ref(), self.rir_table.as_ref(), 1000, self.hide_blacklisted,
         );
         self.swarm_entries = swarm;
         self.drop_ips_total = filtered_total;
@@ -702,6 +711,7 @@ impl App {
             self.neighborhood_time_window.as_ns(),
             self.neighborhood_bot_threshold.value(),
             self.asn_table.as_ref(),
+            self.rir_table.as_ref(),
             self.neighborhood_sort,
         );
         if self.neighborhood_scroll >= self.neighborhoods.len() && !self.neighborhoods.is_empty() {
@@ -759,6 +769,31 @@ impl App {
     /// Returns true if ASN table is currently loading in background.
     pub fn is_asn_loading(&self) -> bool {
         self.asn_load_rx.is_some()
+    }
+
+    /// Start loading RirTable in a background thread (non-blocking).
+    pub fn load_rir_table_async(&mut self) {
+        if self.rir_table.is_some() || self.rir_load_rx.is_some() {
+            return;
+        }
+        let db_path = self.db_path.clone();
+        let (tx, rx) = mpsc::channel();
+        self.rir_load_rx = Some(rx);
+        std::thread::spawn(move || {
+            if let Some(data) = RirTable::load_data(&db_path) {
+                let _ = tx.send(data);
+            }
+        });
+    }
+
+    /// Check if background RIR load is complete (non-blocking).
+    pub fn poll_rir_table(&mut self) {
+        if let Some(ref rx) = self.rir_load_rx {
+            if let Ok(data) = rx.try_recv() {
+                self.rir_table = Some(RirTable::from_data(data));
+                self.rir_load_rx = None;
+            }
+        }
     }
 
     pub fn fetch_forensics(&mut self) -> Result<()> {
@@ -1012,7 +1047,8 @@ impl App {
             .into_iter()
             .map(|cidr| {
                 let (asn, as_name, country) = self.lookup_cidr_asn(&cidr);
-                ListEntry { cidr, asn, as_name, country }
+                let rir_country = self.lookup_cidr_rir_country(&cidr);
+                ListEntry { cidr, asn, as_name, country, rir_country }
             })
             .collect();
         self.whitelist_entries.sort_by(|a, b| {
@@ -1031,12 +1067,14 @@ impl App {
             .map(|cidr| {
                 let drop_count = self.blacklist_drop_counts.get(&cidr).copied().unwrap_or(0);
                 let (asn, as_name, country) = self.lookup_cidr_asn(&cidr);
+                let rir_country = self.lookup_cidr_rir_country(&cidr);
                 BlacklistEntry {
                     cidr,
                     drop_count,
                     asn,
                     as_name,
                     country,
+                    rir_country,
                 }
             })
             .collect();
@@ -1059,6 +1097,25 @@ impl App {
             }
         }
         (String::new(), String::new(), String::new())
+    }
+
+    /// Look up the authoritative RIR registration country for an IP (host byte order).
+    pub fn lookup_rir_country_hbo(&self, ip_hbo: u32) -> String {
+        self.rir_table
+            .as_ref()
+            .and_then(|t| t.lookup(ip_hbo))
+            .map(|e| e.country.clone())
+            .unwrap_or_default()
+    }
+
+    /// Look up the authoritative RIR registration country for a CIDR string.
+    pub fn lookup_cidr_rir_country(&self, cidr: &str) -> String {
+        let ip_str = cidr.split('/').next().unwrap_or("");
+        if let Ok(addr) = ip_str.parse::<Ipv4Addr>() {
+            self.lookup_rir_country_hbo(u32::from(addr))
+        } else {
+            String::new()
+        }
     }
 
     fn read_cidr_file(path: &str) -> Vec<String> {
@@ -1736,6 +1793,7 @@ fn build_swarm_entries(
     blacklist_ips: &[(u32, bpf::DropInfo)],
     now_ns: u64,
     asn_table: Option<&AsnTable>,
+    rir_table: Option<&RirTable>,
     max_entries: usize,
     hide_blacklisted: bool,
 ) -> (Vec<SwarmEntry>, usize, Vec<SwarmAsnEntry>) {
@@ -1779,10 +1837,12 @@ fn build_swarm_entries(
         } else {
             asn_key
         };
+        let rir_country = rir_table.and_then(|t| t.lookup(ip_hbo)).map(|e| e.country.clone()).unwrap_or_default();
         let agg = asn_map.entry(asn_key.clone()).or_insert_with(|| SwarmAsnEntry {
             asn: asn_key,
             as_name,
             country,
+            rir_country,
             ip_count: 0,
             total_drops: 0,
             last_seen_ns: 0,
@@ -1813,11 +1873,13 @@ fn build_swarm_entries(
                 .and_then(|t| t.lookup(ip_hbo))
                 .map(|e| (e.asn.clone(), e.as_name.clone(), e.country.clone()))
                 .unwrap_or_default();
+            let rir_country = rir_table.and_then(|t| t.lookup(ip_hbo)).map(|e| e.country.clone()).unwrap_or_default();
             SwarmEntry {
                 ip: Ipv4Addr::from(ip_hbo).to_string(),
                 asn,
                 as_name,
                 country,
+                rir_country,
                 total_drops: count,
                 last_seen_ago: time_fmt::format_ktime_ago(last_seen, now_ns),
                 last_seen_ns: last_seen,
@@ -1831,6 +1893,7 @@ fn build_swarm_entries(
 
 /// Build neighborhoods by merging `drop_ips` and `blacklist_ips` BPF maps,
 /// filtering by time window and grouping by ASN subnet.
+#[allow(clippy::too_many_arguments)]
 fn build_neighborhoods(
     drop_ips: &[(u32, bpf::DropInfo)],
     blacklist_ips: &[(u32, bpf::DropInfo)],
@@ -1838,6 +1901,7 @@ fn build_neighborhoods(
     window_ns: u64,
     bot_threshold: i64,
     asn_table: Option<&AsnTable>,
+    rir_table: Option<&RirTable>,
     sort: NeighborhoodSort,
 ) -> Vec<forensics::Neighborhood> {
     let asn_table = match asn_table {
@@ -1872,6 +1936,7 @@ fn build_neighborhoods(
         asn: String,
         as_name: String,
         country: String,
+        rir_country: String,
         start_ip: u32,
         end_ip: u32,
         bot_count: i64,
@@ -1886,10 +1951,12 @@ fn build_neighborhoods(
             let mask = if plen == 0 { 0 } else { !((1u32 << (32 - plen)) - 1) };
             let net_addr = asn_entry.start & mask;
 
+            let rir_cc = rir_table.and_then(|t| t.lookup(ip_hbo)).map(|e| e.country.clone()).unwrap_or_default();
             let entry = subnets.entry((net_addr, plen)).or_insert_with(|| SubnetAccum {
                 asn: asn_entry.asn.clone(),
                 as_name: asn_entry.as_name.clone(),
                 country: asn_entry.country.clone(),
+                rir_country: rir_cc,
                 start_ip: asn_entry.start,
                 end_ip: asn_entry.end,
                 bot_count: 0,
@@ -1912,6 +1979,7 @@ fn build_neighborhoods(
             asn: acc.asn,
             as_name: acc.as_name,
             country: acc.country,
+            rir_country: acc.rir_country,
             bot_count: acc.bot_count,
             total_impact: acc.total_impact,
             start_ip: acc.start_ip,
@@ -2081,6 +2149,7 @@ mod tests {
                 asn: "AS1".into(),
                 as_name: String::new(),
                 country: "US".into(),
+                rir_country: String::new(),
                 total_drops: 100,
                 last_seen_ago: "3s ago".into(),
                 last_seen_ns: 0,
@@ -2091,6 +2160,7 @@ mod tests {
                 asn: "AS2".into(),
                 as_name: String::new(),
                 country: "DE".into(),
+                rir_country: String::new(),
                 total_drops: 200,
                 last_seen_ago: "1s ago".into(),
                 last_seen_ns: 0,
@@ -2101,6 +2171,7 @@ mod tests {
                 asn: "AS3".into(),
                 as_name: String::new(),
                 country: "CN".into(),
+                rir_country: String::new(),
                 total_drops: 300,
                 last_seen_ago: "5s ago".into(),
                 last_seen_ns: 0,
@@ -2133,6 +2204,7 @@ mod tests {
                 subnet_cidr: "10.0.0.0/24".into(),
                 asn: "AS1".into(),
                 country: "US".into(),
+                rir_country: String::new(),
                 bot_count: 5,
                 total_impact: 1000,
                 start_ip: 0,
@@ -2143,6 +2215,7 @@ mod tests {
                 subnet_cidr: "10.0.1.0/24".into(),
                 asn: "AS2".into(),
                 country: "DE".into(),
+                rir_country: String::new(),
                 bot_count: 4,
                 total_impact: 800,
                 start_ip: 0,
@@ -2153,6 +2226,7 @@ mod tests {
                 subnet_cidr: "10.0.2.0/24".into(),
                 asn: "AS3".into(),
                 country: "CN".into(),
+                rir_country: String::new(),
                 bot_count: 3,
                 total_impact: 600,
                 start_ip: 0,
@@ -2202,6 +2276,7 @@ mod tests {
                 asn: "AS1234".into(),
                 as_name: String::new(),
                 country: String::new(),
+                rir_country: String::new(),
                 total_drops: 600,
                 last_seen_ago: "1s ago".into(),
                 last_seen_ns: 0,
@@ -2212,6 +2287,7 @@ mod tests {
                 asn: "AS5678".into(),
                 as_name: String::new(),
                 country: String::new(),
+                rir_country: String::new(),
                 total_drops: 400,
                 last_seen_ago: "2s ago".into(),
                 last_seen_ns: 0,
@@ -2249,6 +2325,7 @@ mod tests {
             asn: "AS1234".into(),
             as_name: String::new(),
             country: String::new(),
+            rir_country: String::new(),
             total_drops: 600,
             last_seen_ago: "1s ago".into(),
             last_seen_ns: 0,
@@ -2269,6 +2346,7 @@ mod tests {
                 asn: "AS1".into(),
                 as_name: String::new(),
                 country: "US".into(),
+                rir_country: String::new(),
                 bot_count: 5,
                 total_impact: 1000,
                 start_ip: 0,
@@ -2279,6 +2357,7 @@ mod tests {
                 asn: "AS2".into(),
                 as_name: String::new(),
                 country: "CN".into(),
+                rir_country: String::new(),
                 bot_count: 4,
                 total_impact: 800,
                 start_ip: 0,
@@ -2289,6 +2368,7 @@ mod tests {
                 asn: "AS3".into(),
                 as_name: String::new(),
                 country: "DE".into(),
+                rir_country: String::new(),
                 bot_count: 3,
                 total_impact: 600,
                 start_ip: 0,
@@ -2311,6 +2391,7 @@ mod tests {
                 asn: "AS1".into(),
                 as_name: "ZEBRA".into(),
                 country: "US".into(),
+                rir_country: String::new(),
                 bot_count: 5,
                 total_impact: 1000,
                 start_ip: 0,
@@ -2321,6 +2402,7 @@ mod tests {
                 asn: "AS2".into(),
                 as_name: "ALPHA".into(),
                 country: "DE".into(),
+                rir_country: String::new(),
                 bot_count: 4,
                 total_impact: 800,
                 start_ip: 0,
@@ -2449,7 +2531,7 @@ mod tests {
 
     #[test]
     fn test_build_swarm_empty_maps() {
-        let (result, total, agg) = build_swarm_entries(&[], &[], 1_000_000_000, None, 1000, false);
+        let (result, total, agg) = build_swarm_entries(&[], &[], 1_000_000_000, None, None, 1000, false);
         assert!(result.is_empty());
         assert_eq!(total, 0);
         assert!(agg.is_empty());
@@ -2474,7 +2556,7 @@ mod tests {
                 count: 50,
             },
         )];
-        let (result, _, _) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, 1000, false);
+        let (result, _, _) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].ip, "10.0.0.1");
         assert_eq!(result[0].total_drops, 150); // summed
@@ -2496,7 +2578,7 @@ mod tests {
                 )
             })
             .collect();
-        let (result, total, agg) = build_swarm_entries(&drop_ips, &[], now, None, 3, false);
+        let (result, total, agg) = build_swarm_entries(&drop_ips, &[], now, None, None, 3, false);
         assert_eq!(result.len(), 3);
         assert_eq!(total, 10); // 10 IPs total, only 3 shown
         // ASN aggregation covers all 10 IPs (pre-truncation), not just the 3 shown
@@ -2519,7 +2601,7 @@ mod tests {
                 count: 42,
             },
         )];
-        let (result, _, _) = build_swarm_entries(&drop_ips, &[], now, None, 1000, false);
+        let (result, _, _) = build_swarm_entries(&drop_ips, &[], now, None, None, 1000, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].reason, "Dynamic");
         assert_eq!(result[0].last_seen_ago, "3s ago");
@@ -2538,11 +2620,11 @@ mod tests {
             (ip1, bpf::DropInfo { last_seen: now - 500_000_000, count: 50 }),
         ];
         // Without filter: both IPs shown, ip1 is Blacklist
-        let (result, total, _) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, 1000, false);
+        let (result, total, _) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, false);
         assert_eq!(result.len(), 2);
         assert_eq!(total, 2);
         // With filter: only ip2 (Dynamic) survives — ASN agg also reflects filtered set
-        let (result, total, agg) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, 1000, true);
+        let (result, total, agg) = build_swarm_entries(&drop_ips, &blacklist_ips, now, None, None, 1000, true);
         assert_eq!(result.len(), 1);
         assert_eq!(total, 1);
         assert_eq!(result[0].reason, "Dynamic");
@@ -2567,7 +2649,7 @@ mod tests {
         let blacklist_ips = vec![
             (u32::to_be(0x0B000001), bpf::DropInfo { last_seen: now - 2_000_000_000, count: 200 }),
         ];
-        let (_, _, agg) = build_swarm_entries(&drop_ips, &blacklist_ips, now, Some(&asn_table), 1000, false);
+        let (_, _, agg) = build_swarm_entries(&drop_ips, &blacklist_ips, now, Some(&asn_table), None, 1000, false);
         assert_eq!(agg.len(), 2);
         // Sorted by total_drops DESC: AS5678=200, AS1234=150
         assert_eq!(agg[0].asn, "AS5678");
@@ -2591,7 +2673,7 @@ mod tests {
             (u32::to_be(0x0A000001), bpf::DropInfo { last_seen: now - 1_000_000_000, count: 100 }),
             (u32::to_be(0x0A000002), bpf::DropInfo { last_seen: now - 1_000_000_000, count: 50 }),
         ];
-        let (_, _, agg) = build_swarm_entries(&drop_ips, &[], now, None, 1000, false);
+        let (_, _, agg) = build_swarm_entries(&drop_ips, &[], now, None, None, 1000, false);
         assert_eq!(agg.len(), 1);
         assert_eq!(agg[0].asn, "Unknown");
         assert_eq!(agg[0].ip_count, 2);
@@ -2613,7 +2695,7 @@ mod tests {
         for i in 1u32..=3 {
             drop_ips.push((u32::to_be(0x0B000000 + i), bpf::DropInfo { last_seen: now - 1_000_000_000, count: u64::from(i) * 100 }));
         }
-        let (per_ip, total, agg) = build_swarm_entries(&drop_ips, &[], now, Some(&asn_table), 3, false);
+        let (per_ip, total, agg) = build_swarm_entries(&drop_ips, &[], now, Some(&asn_table), None, 3, false);
         assert_eq!(per_ip.len(), 3);
         assert_eq!(total, 10);
         // ASN agg covers all 10 IPs
@@ -2675,6 +2757,7 @@ mod tests {
             TimeWindow::OneHour.as_ns(),
             2,
             Some(&asn_table),
+            None,
             NeighborhoodSort::Impact,
         );
         assert_eq!(result.len(), 1);
@@ -2730,6 +2813,7 @@ mod tests {
             window,
             2,
             Some(&asn_table),
+            None,
             NeighborhoodSort::Impact,
         );
         assert_eq!(result.len(), 1);
@@ -2765,6 +2849,7 @@ mod tests {
             TimeWindow::OneHour.as_ns(),
             2,
             Some(&asn_table),
+            None,
             NeighborhoodSort::Impact,
         );
         assert!(result.is_empty()); // 2 bots, threshold is >2
@@ -2786,6 +2871,7 @@ mod tests {
             now,
             TimeWindow::OneHour.as_ns(),
             0,
+            None,
             None,
             NeighborhoodSort::Impact,
         );
@@ -2834,6 +2920,7 @@ mod tests {
             asn: String::new(),
             as_name: String::new(),
             country: String::new(),
+            rir_country: String::new(),
         }];
         let counts = build_blacklist_drop_counts(&blacklist_ips, &entries);
         assert_eq!(counts.get("10.0.0.0/24").copied().unwrap_or(0), 800);
@@ -2852,6 +2939,7 @@ mod tests {
             asn: String::new(),
             as_name: String::new(),
             country: String::new(),
+            rir_country: String::new(),
         }];
         let counts = build_blacklist_drop_counts(&blacklist_ips, &entries);
         assert_eq!(counts.get("10.0.0.0/24"), None);
@@ -2870,6 +2958,7 @@ mod tests {
             asn: String::new(),
             as_name: String::new(),
             country: String::new(),
+            rir_country: String::new(),
         }];
         let counts = build_blacklist_drop_counts(&blacklist_ips, &entries);
         assert_eq!(counts.get("10.0.0.1/32").copied().unwrap_or(0), 42);

@@ -12,6 +12,8 @@ mod ip_tracker;
 mod metrics;
 mod persist;
 mod report;
+#[allow(dead_code)] // used by tests; production enrichment in a follow-up
+mod rir_table;
 mod ttl;
 
 use std::cell::RefCell;
@@ -89,6 +91,10 @@ struct Args {
     /// Import ip2asn TSV file into SQLite and exit (no daemon mode)
     #[arg(long)]
     import_asn: Option<String>,
+
+    /// Import RIR delegation files from a directory into SQLite and exit
+    #[arg(long)]
+    import_rir: Option<String>,
 }
 
 fn write_pid_file() -> io::Result<()> {
@@ -192,6 +198,106 @@ fn import_asn_tsv(tsv_path: &str, db_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Import RIR delegation files from `dir_path` into the `rir_delegations` table.
+/// Reads all `delegated-*-extended-latest` files in the directory.
+/// Uses atomic table swap (rir_delegations_new → rir_delegations).
+fn import_rir_delegations(dir_path: &str, db_path: &str) -> Result<()> {
+    use rusqlite::Connection;
+    use std::io::{BufRead, BufReader};
+    use std::net::Ipv4Addr;
+
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("cannot open database: {db_path}"))?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+
+    conn.execute("DROP TABLE IF EXISTS rir_delegations_new", [])?;
+    conn.execute(
+        "CREATE TABLE rir_delegations_new (
+            start_ip INTEGER NOT NULL, end_ip INTEGER NOT NULL,
+            country TEXT NOT NULL, registry TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        "INSERT INTO rir_delegations_new (start_ip, end_ip, country, registry) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+
+    let mut total: u64 = 0;
+    let entries = std::fs::read_dir(dir_path)
+        .with_context(|| format!("cannot read directory: {dir_path}"))?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("delegated-") || !name.contains("-extended-latest") {
+            continue;
+        }
+        let file = std::fs::File::open(entry.path())
+            .with_context(|| format!("cannot open {}", entry.path().display()))?;
+        let reader = BufReader::new(file);
+        let mut file_count: u64 = 0;
+
+        for line in reader.lines() {
+            let line = line?;
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('|').collect();
+            if fields.len() < 7 {
+                continue;
+            }
+            let (registry, cc, record_type, start_s, value_s, _date, status) =
+                (fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]);
+
+            // Only IPv4 allocated/assigned rows.
+            if record_type != "ipv4" {
+                continue;
+            }
+            if status != "allocated" && status != "assigned" {
+                continue;
+            }
+            // Skip summary/header lines (cc is "*" or empty).
+            if cc == "*" || cc.is_empty() {
+                continue;
+            }
+
+            let start: u32 = match start_s.parse::<Ipv4Addr>() {
+                Ok(addr) => u32::from(addr),
+                Err(_) => continue,
+            };
+            let count: u32 = match value_s.parse::<u32>() {
+                Ok(v) if v > 0 => v,
+                _ => continue,
+            };
+            let end: u32 = start.saturating_add(count - 1);
+
+            #[allow(clippy::cast_possible_wrap)]
+            stmt.execute(rusqlite::params![start as i64, end as i64, cc, registry])?;
+            file_count += 1;
+        }
+
+        info!("RIR: parsed {file_count} IPv4 ranges from {name}");
+        total += file_count;
+    }
+
+    drop(stmt);
+    tx.commit()?;
+
+    conn.execute("DROP TABLE IF EXISTS rir_delegations", [])?;
+    conn.execute(
+        "ALTER TABLE rir_delegations_new RENAME TO rir_delegations",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX idx_rir_ips ON rir_delegations (start_ip, end_ip)",
+        [],
+    )?;
+
+    info!("Imported {total} RIR delegation ranges from {dir_path} into {db_path}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -207,6 +313,12 @@ fn main() -> Result<()> {
     // Handle --import-asn: import TSV and exit (no daemon mode)
     if let Some(tsv_path) = &args.import_asn {
         import_asn_tsv(tsv_path, &args.db_path)?;
+        return Ok(());
+    }
+
+    // Handle --import-rir: import RIR delegation files and exit
+    if let Some(dir_path) = &args.import_rir {
+        import_rir_delegations(dir_path, &args.db_path)?;
         return Ok(());
     }
 

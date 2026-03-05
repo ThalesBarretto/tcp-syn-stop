@@ -208,7 +208,13 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
            active INTEGER NOT NULL DEFAULT 1
          );
          CREATE UNIQUE INDEX IF NOT EXISTS idx_autoban_active_prefix
-           ON autoban_history (net_addr, prefix_len) WHERE active = 1;",
+           ON autoban_history (net_addr, prefix_len) WHERE active = 1;
+         CREATE TABLE IF NOT EXISTS rir_delegations (
+           start_ip INTEGER NOT NULL, end_ip INTEGER NOT NULL,
+           country TEXT NOT NULL, registry TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_rir_ips
+           ON rir_delegations (start_ip, end_ip);",
     )
 }
 

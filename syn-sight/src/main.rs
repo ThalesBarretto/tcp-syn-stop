@@ -5,6 +5,7 @@ mod bpf;
 mod forensics;
 mod input;
 mod protocol;
+mod rir_table;
 mod time_fmt;
 mod ui;
 mod validation;
@@ -124,6 +125,7 @@ fn main() -> Result<()> {
         app.init_statsd(addr);
     }
     app.load_asn_table_async();
+    app.load_rir_table_async();
     // First-frame fetch so the initial render is not empty
     let _ = app.fetch_data();
     app.update_asn_pps();
@@ -164,6 +166,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App, tick_rate: Dur
 
         if last_tick.elapsed() >= tick_rate {
             app.poll_asn_table();
+            app.poll_rir_table();
             app.poll_forensics();
             // Debounced ASN search
             if let Some(ref search) = app.asn_search {
